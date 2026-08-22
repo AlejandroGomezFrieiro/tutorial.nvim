@@ -9,7 +9,7 @@
     # dangles), so the sibling repo is pinned by its local git URL instead.
     nixvim.url = "github:nix-community/nixvim";
     nixvim.inputs.nixpkgs.follows = "nixpkgs";
-    nixvim_config.url = "git+file:///home/alejandro/nixvim_config";
+    nixvim_config.url = "github:AlejandroGomezFrieiro/nixvim_config";
     nixvim_config.inputs.nixpkgs.follows = "nixpkgs";
   };
 

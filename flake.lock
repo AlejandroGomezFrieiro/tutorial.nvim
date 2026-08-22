@@ -218,15 +218,15 @@
       "locked": {
         "lastModified": 1787226482,
         "narHash": "sha256-gm5HdGviOstXrxdTV66GgtwxHk1uXuIOXagCv5IWnWM=",
-        "ref": "refs/heads/main",
+        "owner": "AlejandroGomezFrieiro",
+        "repo": "nixvim_config",
         "rev": "7b586b6d59ab10ac466b62cebb4d4b3b7aca058d",
-        "revCount": 164,
-        "type": "git",
-        "url": "file:///home/alejandro/nixvim_config"
+        "type": "github"
       },
       "original": {
-        "type": "git",
-        "url": "file:///home/alejandro/nixvim_config"
+        "owner": "AlejandroGomezFrieiro",
+        "repo": "nixvim_config",
+        "type": "github"
       }
     },
     "nixvim_config_2": {
