@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        neovim: ["0.10.4", "0.11.3"]
+        neovim: ["v0.10.4", "v0.11.3"]
     steps:
       - uses: actions/checkout@v4
       - uses: rhysd/action-setup-vim@v1
