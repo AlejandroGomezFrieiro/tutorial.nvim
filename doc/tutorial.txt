@@ -19,8 +19,8 @@ COMMANDS                                                        *tutorial-comman
     tutorial. While a session is active, re-opening shows the current step.
 
     A built-in tour, "Hello, tutorial.nvim" (id `hello`), walks through every
-    completion mechanism by completing its steps in different ways — the
-    engine's own proof of life.
+    completion mechanism by completing its steps in different ways, and asks
+    you one question along the way — the engine's own proof of life.
 
 :Tutorial reset [id]                                          *:Tutorial-reset*
     Forget sticky progress. With an id, reset that tutorial only; without,
@@ -28,7 +28,8 @@ COMMANDS                                                        *tutorial-comman
 
 Step card keys:                                        *tutorial-step-keys*
     n  view next step            p  view previous step
-    h  toggle the hint           d  mark this step done
+    h  toggle the hint           a  answer the step's question
+    r  re-answer (overwrite)     d  mark this step done
     s  hide/show the pinned panel
     q  pause (progress saved)
 
@@ -54,14 +55,23 @@ Plugins register definitions at load time: >
           title = "Do the thing",
           body = { "Press {key:<leader>x}." },
           hint = "Shown when the user presses h",
+          cond = function(ctx) return true end,  -- false skips the step
+          enter = function(ctx) end,             -- once on first present
+          complete = function(ctx) end,          -- when checked off
+          input = {                              -- ask the user (optional)
+            question = "Your name",
+            store = "name",                      -- answer -> ctx.name
+          },
           completion = {
             "on_command:MyThing",
-            { context = function() return vim.g.thing_ran end },
+            { context = function(ctx) return vim.g.thing_ran end },
           },
         },
       },
     })
 <
+    `steps` may also be a function(ctx) -> list, re-evaluated on start and
+    resume so the tour shape can follow the user's answers.
 
 Completion specs ~                                            *tutorial-events*
 
@@ -73,15 +83,27 @@ authoring guide lives in `docs/authoring.md` in the repository.
     on_buffer:pattern         A buffer opened whose path matches the Lua pattern.
     on_file_exists:glob       The glob expands to at least one path.
     on_file_contains:p:pat    The readable file p contains Lua pattern pat.
-    { context = fn }          A predicate called with no arguments.
+    { context = fn }          A predicate, called with the session ctx.
 
 Body text ~                                              *tutorial-body*
 Body lines are strings. `{key:X}` tokens render as key hints; tokens
 containing spaces are treated as prose descriptions instead of mappings.
+`{ctx:field}` and `{answer:step_id}` interpolate the user's answers into
+title, body, and hint (and into path/glob/pattern spec args); unknown fields
+stay verbatim. require("tutorial").slug() makes answer values path-safe.
+
+Input steps ~                                            *tutorial-input*
+A step with an `input` table asks its user at the command line — focus never
+moves. The prompt fires once per session; `transform` then `validate` run on
+confirm (invalid re-prompts, <Esc> cancels), and a valid answer is stored
+into ctx under `store` and persisted. `d` always completes regardless;
+`a` answers on demand, `r` re-answers.
 
 Progress storage ~                                  *tutorial-persistence*
-Sticky JSON under `stdpath("data")/tutorial/<id>.json`. Completion is
-write-once; only |:Tutorial-reset| un-completes steps.
+Sticky JSON under `stdpath("data")/tutorial/<id>.json` holding `done`
+(write-once), `answers` (input captures), and `vars` (free-form). Only
+|:Tutorial-reset| clears them. Resume seeds ctx from answers/vars before
+setup and lands on the first incomplete step of the resolved step list.
 
 setup({opts})                                                *tutorial-setup*
     Defines :Tutorial. `opts.data_dir` overrides the progress directory.

@@ -15,6 +15,13 @@
 -- Edge specs are evaluated when their hub event fires; state specs are polled
 -- (CursorHold, card render, manual check). Any satisfied spec completes the
 -- step.
+--
+-- Path/glob/pattern args resolve {ctx:field} / {answer:step_id} tokens
+-- against the live session at evaluate time (never at parse time — answers
+-- change between polls). Context predicates receive the session ctx as their
+-- first argument; existing zero-arg predicates keep working.
+
+local input = require("tutorial.input")
 
 local M = {}
 
@@ -37,11 +44,24 @@ function M.parse(spec)
   elseif kind == "on_file_exists" then
     return { kind = "file_exists", arg = rest }
   elseif kind == "on_file_contains" then
-    local path, pattern = rest:match("^([^:]+):(.+)$")
-    if not path then
+    -- First colon OUTSIDE {...} splits path from pattern, so tokenized paths
+    -- like notes-{answer:id}.md:{ctx:word} survive intact.
+    local cut, depth = nil, 0
+    for i = 1, #rest do
+      local c = rest:sub(i, i)
+      if c == "{" then
+        depth = depth + 1
+      elseif c == "}" then
+        depth = math.max(depth - 1, 0)
+      elseif c == ":" and depth == 0 then
+        cut = i
+        break
+      end
+    end
+    if not cut then
       error(("[tutorial.nvim] %s needs a path:pattern"):format(tostring(spec)), 0)
     end
-    return { kind = "file_contains", path = path, pattern = pattern }
+    return { kind = "file_contains", path = rest:sub(1, cut - 1), pattern = rest:sub(cut + 1) }
   end
   error(("[tutorial.nvim] unknown completion spec %q"):format(tostring(spec)), 0)
 end
@@ -79,11 +99,40 @@ local function anchored(path, cwd)
   return cwd .. "/" .. path:gsub("^%./", "")
 end
 
+-- Interpolate session tokens into a spec arg. A token that cannot resolve
+-- stays verbatim in copy, but in a matcher it means "nothing sane to match":
+-- return nil so the spec reports false instead of feeding broken text to
+-- expand()/glob().
+local function resolved(text, ctx, answers)
+  local out = input.interpolate(text, ctx, answers)
+  if type(out) ~= "string" or out:find("{ctx:", 1, true) or out:find("{answer:", 1, true) then
+    return nil
+  end
+  return out
+end
+
+-- Interpolate, expand (~, env vars), and anchor to the session cwd. Nil when
+-- anything along the way is unresolvable.
+local function expanded(text, ctx, answers, cwd)
+  local value = resolved(text, ctx, answers)
+  if not value then
+    return nil
+  end
+  local ok, out = pcall(vim.fn.expand, value)
+  if not ok then
+    return nil
+  end
+  return anchored(out, cwd)
+end
+
 -- Evaluate one parsed spec. `trigger` carries optional event payload:
 --   trigger.command — the executed Ex command line (command specs)
 --   trigger.event   — the fired User pattern (event specs)
+--   trigger.ctx     — the session context (token interpolation, predicates)
+--   trigger.answers — per-step answers (answer-token interpolation)
 function M.evaluate(parsed, trigger)
   trigger = trigger or {}
+  local ctx, answers = trigger.ctx, trigger.answers
   local kind = parsed.kind
   if kind == "command" then
     local line = trigger.command
@@ -96,18 +145,26 @@ function M.evaluate(parsed, trigger)
   elseif kind == "event" then
     return trigger.event ~= nil and trigger.event == parsed.arg
   elseif kind == "buffer" then
+    local pattern = resolved(parsed.arg, ctx, answers)
+    if not pattern then
+      return false
+    end
     local name = vim.api.nvim_buf_get_name(trigger.buf or 0)
-    return name ~= "" and name:find(parsed.arg) ~= nil
+    return name ~= "" and name:find(pattern) ~= nil
   elseif kind == "file_exists" then
-    local glob = anchored(vim.fn.expand(parsed.arg), trigger.cwd)
-    return #vim.fn.glob(glob, false, true) > 0
+    local glob = expanded(parsed.arg, ctx, answers, trigger.cwd)
+    return glob ~= nil and #vim.fn.glob(glob, false, true) > 0
   elseif kind == "file_contains" then
-    local path = anchored(vim.fn.expand(parsed.path), trigger.cwd)
-    if vim.fn.filereadable(path) ~= 1 then
+    local path = expanded(parsed.path, ctx, answers, trigger.cwd)
+    if not path or vim.fn.filereadable(path) ~= 1 then
+      return false
+    end
+    local pattern = resolved(parsed.pattern, ctx, answers)
+    if not pattern then
       return false
     end
     for _, line in ipairs(vim.fn.readfile(path)) do
-      if line:find(parsed.pattern) then
+      if line:find(pattern) then
         return true
       end
     end
@@ -116,7 +173,7 @@ function M.evaluate(parsed, trigger)
     if type(parsed.fn) ~= "function" then
       return false
     end
-    local ok, res = pcall(parsed.fn)
+    local ok, res = pcall(parsed.fn, ctx)
     return ok and res ~= nil and res ~= false
   end
   return false

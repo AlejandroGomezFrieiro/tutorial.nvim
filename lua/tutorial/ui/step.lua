@@ -1,8 +1,10 @@
 -- tutorial.ui.step
 -- Step-card content shared by the pinned panel and the full-window card, plus
--- the legacy full-window presentation (layout = "card").
+-- the legacy full-window presentation (layout = "card"). Copy resolves
+-- {ctx:…}/{answer:…} tokens against the live session before rendering.
 
 local engine = require("tutorial.engine")
+local input = require("tutorial.input")
 local state = require("tutorial.state")
 local ui = require("tutorial.ui")
 
@@ -43,16 +45,19 @@ local function key_segments(text)
   return { segments = segments }
 end
 
-function M.bar(def)
-  local done_count = state.progress(def)
+-- Progress glyphs and counts over the session's resolved step list (cond-
+-- skipped steps are neither rendered nor counted).
+function M.bar(session)
+  local def = session.def
+  local steps = session.steps
   local glyphs = {}
-  for _, step in ipairs(def.steps) do
+  for _, step in ipairs(steps) do
     glyphs[#glyphs + 1] = state.is_done(def.id, step.id) and "✦" or "✧"
   end
   return {
     segments = {
       { text = "  " .. table.concat(glyphs, "") .. " ", hl = "TutorialAccent" },
-      { text = ("%d/%d"):format(done_count, #def.steps), hl = "TutorialKey" },
+      { text = ("%d/%d"):format(state.progress(def, steps), #steps), hl = "TutorialKey" },
     },
   }
 end
@@ -62,29 +67,40 @@ end
 function M.lines(session, opts)
   opts = opts or {}
   local def = session.def
-  local step = def.steps[session.index]
+  local ctx, answers = session.ctx, session.answers
+  local step = session.steps[session.index]
   local entries = {
     { text = "  ✦  " .. string.upper(def.title), hl = "TutorialTitle" },
-    M.bar(def),
+    M.bar(session),
     {
       segments = {
         { text = ("  Step %d — "):format(session.index), hl = "TutorialAccent" },
-        { text = step.title, hl = "TutorialKey" },
+        { text = input.interpolate(step.title, ctx, answers), hl = "TutorialKey" },
       },
     },
     { text = "" },
   }
   local body = type(step.body) == "string" and { step.body } or step.body
   for _, line in ipairs(body) do
-    entries[#entries + 1] = type(line) == "string" and key_segments("  " .. line) or line
+    entries[#entries + 1] = type(line) == "string"
+        and key_segments("  " .. input.interpolate(line, ctx, answers))
+      or line
   end
   if show_hint and step.hint then
     entries[#entries + 1] = { text = "" }
-    entries[#entries + 1] = { text = "  Hint: " .. step.hint, hl = "TutorialCardMeta" }
+    entries[#entries + 1] = {
+      text = "  Hint: " .. input.interpolate(step.hint, ctx, answers),
+      hl = "TutorialCardMeta",
+    }
   end
   entries[#entries + 1] = { text = "" }
-  entries[#entries + 1] =
-    ui.footer("[n]ext [p]rev [h]int d(one)" .. (opts.panel and " [s]hide" or "") .. " q(uit)")
+  entries[#entries + 1] = ui.footer(
+    "[n]ext [p]rev [h]int"
+      .. (step.input and " [a]nswer" or "")
+      .. " d(one)"
+      .. (opts.panel and " [s]hide" or "")
+      .. " q(uit)"
+  )
   return entries
 end
 
@@ -104,6 +120,13 @@ function M.open(session)
     h = function()
       show_hint = not show_hint
       M.open(session)
+    end,
+    a = function()
+      engine.answer()
+    end,
+    r = function()
+      -- Re-answer: same prompt, stored value overwritten.
+      engine.answer()
     end,
     d = function()
       show_hint = false

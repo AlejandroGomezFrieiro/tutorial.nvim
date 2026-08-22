@@ -13,9 +13,16 @@ and focus never move. You write; it keeps score.
 | --- | --- |
 | `n` / `p` | next / previous step (viewing only) |
 | `h` | toggle the hint |
+| `a` | answer the current step's question (steps with an input show `[a]nswer`) |
+| `r` | re-answer: prompts again and overwrites the stored answer |
 | `d` | mark this step done manually |
 | `s` | hide / show the pinned panel |
 | `q` | pause the tutorial (progress saved) |
+
+Questions draw on the command line and never move your focus. Answering
+stores the value for the rest of the tour — later steps can speak it back —
+and survives quitting. `<Esc>` skips the question; `d` always completes the
+step either way.
 
 Re-running `:Tutorial` while active hides or restores the panel. When the
 last step completes, the panel shows a completion summary until you dismiss

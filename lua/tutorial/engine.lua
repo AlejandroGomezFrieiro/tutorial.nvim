@@ -13,6 +13,12 @@
 -- Presentation: layout "card" renders full-window cards (reused window);
 -- anything else — the default — pins the walkthrough panel beside the
 -- workspace and never moves the user's focus.
+--
+-- The session carries its own resolved view of the tour (`session.steps`):
+-- def.steps may be a function of ctx, and steps whose `cond` excludes them
+-- are neither rendered nor counted. Input steps prompt through input.lua
+-- under an engine-owned capture-once guard; answers land in ctx and the
+-- progress file, so copy, checks, and resume all see them.
 
 local registry = require("tutorial.registry")
 local state = require("tutorial.state")
@@ -20,16 +26,20 @@ local checks = require("tutorial.checks")
 
 local M = {}
 
-local session -- { def, index, ctx, cwd, prev_win } or nil
+local session -- { def, steps, index, ctx, answers, cwd, prev_win, entered,
+-- asked } or nil
 local advancing -- guards against re-entrant evaluation while a completion is
 -- being processed (rendering the next card fires BufEnter, which would
 -- otherwise evaluate again and delete the buffer mid-render)
+-- Mutually recursive trio: present schedules input capture, capture nudges
+-- evaluation, evaluation advances and presents again.
+local present, ask_current, evaluate
 
 local function step()
   if not session then
     return nil
   end
-  return session.def.steps[session.index]
+  return session.steps[session.index]
 end
 
 local function notify(msg, level)
@@ -40,23 +50,143 @@ local function panel_mode()
   return session ~= nil and session.def.layout ~= "card"
 end
 
+-- Seed persisted answer values into ctx under their input stores. Idempotent;
+-- run against both static and resolved step lists (a steps-function's stores
+-- are unknowable until it runs).
+local function seed_answers(ctx, steps, answers)
+  for _, s in ipairs(steps) do
+    if type(s) == "table" and s.input then
+      local stored = answers[s.id]
+      if stored ~= nil then
+        ctx[s.input.store or s.id] = stored
+      end
+    end
+  end
+end
+
+-- The context a definition sees outside any active session: persisted vars
+-- plus answer-store seeds. Second return is the raw answers map.
+function M.context_for(def)
+  local data = state.load(def.id)
+  local ctx = {}
+  for key, value in pairs(data.vars or {}) do
+    ctx[key] = value
+  end
+  if type(def.steps) == "table" then
+    seed_answers(ctx, def.steps, data.answers or {})
+  end
+  return ctx, data.answers or {}
+end
+
+-- Resolve a definition's effective step list for a context: def.steps may be
+-- a function(ctx) -> list, and steps whose cond excludes them drop out
+-- (neither rendered nor counted). Errors in either hook degrade to a
+-- notification, never a crash — never trap the user.
+function M.resolve_steps(def, ctx)
+  local raw = def.steps
+  if type(raw) == "function" then
+    local ok, list = pcall(raw, ctx)
+    if ok and type(list) == "table" then
+      raw = list
+    else
+      notify(("steps() failed for %q: %s"):format(def.title, tostring(list)), vim.log.levels.ERROR)
+      raw = {}
+    end
+  end
+  local out = {}
+  for _, s in ipairs(raw) do
+    if type(s) == "table" then
+      local keep = true
+      if type(s.cond) == "function" then
+        local ok, res = pcall(s.cond, ctx)
+        keep = ok and res ~= nil and res ~= false
+      end
+      if keep then
+        out[#out + 1] = s
+      end
+    end
+  end
+  return out
+end
+
 -- Route the current step to its surface: pinned panel or full-window card.
-local function present()
+function present()
   if not session then
     return
+  end
+  local current = step()
+  if not current then
+    return
+  end
+  if type(current.enter) == "function" and not session.entered[current.id] then
+    session.entered[current.id] = true
+    local ok, err = pcall(current.enter, session.ctx)
+    if not ok then
+      notify(("step enter failed: %s"):format(err), vim.log.levels.ERROR)
+    end
   end
   if panel_mode() then
     require("tutorial.ui.panel").update(session)
   else
     require("tutorial.ui.step").open(session)
   end
+  -- Capture-once for input steps: the engine owns the guard (never a polled
+  -- predicate), and the prompt fires off the render tick.
+  if current.input and not session.asked[current.id] then
+    vim.schedule(function()
+      if session and session.steps[session.index] == current and not session.asked[current.id] then
+        ask_current()
+      end
+    end)
+  end
 end
 
+-- Prompt for the current input step and store the answer into the progress
+-- file and ctx. Cancel leaves the answer unset; `d` always still completes.
+-- Also the manual re-answer route ([a]nswer / r overwrite the stored value).
+function ask_current()
+  if not session or advancing then
+    return
+  end
+  local current = step()
+  if not current or not current.input then
+    return
+  end
+  session.asked[current.id] = true
+  local value = require("tutorial.input").capture(current.input)
+  if value == nil then
+    return
+  end
+  state.set_answer(session.def.id, current.id, value)
+  session.answers[current.id] = value
+  session.ctx[current.input.store or current.id] = value
+  present() -- copy can now speak the user's own words back
+  -- The answer alone may satisfy a polled predicate; nudge off the tick.
+  vim.schedule(function()
+    evaluate({})
+  end)
+end
+
+M.answer = ask_current
+
 local function finish_step(step_id)
+  local finished
+  for _, s in ipairs(session.steps) do
+    if s.id == step_id then
+      finished = s
+      break
+    end
+  end
   state.mark_done(session.def.id, step_id)
-  local done_count = select(1, state.progress(session.def))
-  notify(("✓ %s (%d/%d)"):format(step().title, done_count, #session.def.steps))
-  if done_count >= #session.def.steps then
+  if finished and type(finished.complete) == "function" then
+    local ok, err = pcall(finished.complete, session.ctx)
+    if not ok then
+      notify(("step complete failed: %s"):format(err), vim.log.levels.ERROR)
+    end
+  end
+  local done_count = select(1, state.progress(session.def, session.steps))
+  notify(("✓ %s (%d/%d)"):format((finished or step()).title, done_count, #session.steps))
+  if done_count >= #session.steps then
     local def = session.def
     local prev_win = session.prev_win
     if def.teardown then
@@ -76,7 +206,7 @@ local function finish_step(step_id)
     return
   end
   -- Advance to the next incomplete step.
-  for i, s in ipairs(session.def.steps) do
+  for i, s in ipairs(session.steps) do
     if not state.is_done(session.def.id, s.id) then
       session.index = i
       break
@@ -96,13 +226,16 @@ end
 
 -- Evaluate every check for the active step. Edge triggers pass a payload;
 -- state predicates are always polled. Relative file specs resolve against the
--- working directory captured when the session started.
-local function evaluate(trigger)
+-- working directory captured when the session started; {ctx:…}/{answer:…}
+-- tokens resolve against the live session context and answers.
+function evaluate(trigger)
   if not session or advancing then
     return false
   end
   trigger = trigger or {}
   trigger.cwd = session.cwd
+  trigger.ctx = session.ctx
+  trigger.answers = session.answers
   local current = step()
   for _, spec in ipairs(checks.specs(current)) do
     if checks.evaluate(spec, trigger) then
@@ -179,16 +312,24 @@ local function ensure_hub()
 end
 
 -- Start (or resume) a tutorial by definition. Any active session is replaced.
+-- Order matters: persisted answers/vars seed ctx *before* setup (so setup,
+-- conds, and a steps-function can rely on prior answers), then the tour shape
+-- resolves, then the resume index locates the first incomplete step.
 function M.start(def)
   if session then
     M.quit(true)
   end
+  local ctx, answers = M.context_for(def)
   session = {
     def = def,
+    steps = {},
     index = 1,
-    ctx = {},
+    ctx = ctx,
+    answers = answers or {},
     cwd = vim.fn.getcwd(),
     prev_win = vim.api.nvim_get_current_win(),
+    entered = {}, -- steps whose enter hook already ran this session
+    asked = {}, -- input steps already prompted this session
   }
   if def.setup then
     local ok, err = pcall(def.setup, session.ctx)
@@ -196,18 +337,30 @@ function M.start(def)
       notify(("setup failed: %s"):format(err), vim.log.levels.ERROR)
     end
   end
-  -- Resume at the first incomplete step.
-  local _, next_id = state.progress(def)
-  for i, s in ipairs(def.steps) do
+  -- Resolve the tour shape now that ctx holds prior answers and setup output.
+  session.steps = M.resolve_steps(def, session.ctx)
+  -- A function-produced list may carry stores unknown at seed time.
+  seed_answers(session.ctx, session.steps, session.answers)
+  -- Resume at the first incomplete step of the resolved list.
+  local _, next_id = state.progress(def, session.steps)
+  if not next_id then
+    notify(("Tutorial %q is already complete — reset it to replay."):format(def.title))
+    local prev_win = session.prev_win
+    session = nil
+    -- setup ran; give teardown its matching chance to clean up.
+    if def.teardown then
+      pcall(def.teardown, ctx)
+    end
+    if prev_win and vim.api.nvim_win_is_valid(prev_win) then
+      pcall(vim.api.nvim_set_current_win, prev_win)
+    end
+    return nil
+  end
+  for i, s in ipairs(session.steps) do
     if s.id == next_id then
       session.index = i
       break
     end
-  end
-  if not next_id then
-    notify(("Tutorial %q is already complete — reset it to replay."):format(def.title))
-    session = nil
-    return nil
   end
   ensure_hub()
   present()
@@ -258,7 +411,7 @@ function M.goto_step(delta)
     return
   end
   local target = session.index + delta
-  if target < 1 or target > #session.def.steps then
+  if target < 1 or target > #session.steps then
     return
   end
   session.index = target

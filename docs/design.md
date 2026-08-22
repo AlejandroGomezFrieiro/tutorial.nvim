@@ -36,6 +36,29 @@ hard to reuse.
    buffer, or steals the window. Deliberate actions (`s`, `:Tutorial`) are
    the only things that bring the panel forward.
 
+## Asking the user anything
+
+Interactive walkthroughs eventually need an answer, not just an observation
+("name your protagonist", "pick a premise"). The same principles decide how:
+
+- **The command line is the calm surface.** `vim.fn.input` draws at the
+  bottom of the screen without touching window focus — the least intrusive
+  place a question can live. Floating dialogs are chrome; the prompt is a
+  colleague leaning over and asking.
+- **Capture-once is engine-owned.** A prompt inside a polled predicate would
+  refire on every BufEnter/CursorHold/render. The engine guards input steps
+  per session instead; predicates stay pure observers.
+- **Never trap, part two.** Cancelling a question is always allowed and just
+  leaves the answer unset; `d` completes regardless. An unanswered step is a
+  step with a nil answer, not a dead end.
+- **Answers are data, not side effects.** They persist in the progress JSON,
+  re-enter ctx before `setup` on resume, and flow back out through `{ctx:…}`/
+  `{answer:…}` tokens in copy and completion args. Copy that cannot resolve a
+  token shows the token itself — a visible typo beats silent emptiness.
+- **Branching stays declarative.** `cond` on a step and steps-as-a-function
+  shape the route from answers; there is no imperative "goto" in the core.
+  The default remains a straight line.
+
 ## Mechanics worth knowing
 
 - Every tutorial surface (pinned panel, card, menu, done screen) owns its
@@ -52,3 +75,7 @@ hard to reuse.
   entry, cursor hold — so "already true" conditions complete eagerly on
   display. That is a feature: write predicates that answer "is the world in
   the desired state", not "did the user just act".
+- The session renders from a *resolved* step list: `def.steps` may be a
+  function of ctx and `cond` drops steps the answers exclude. Skipped steps
+  are not rendered, not counted, and never marked done — progress totals stay
+  honest to what the user actually sees.

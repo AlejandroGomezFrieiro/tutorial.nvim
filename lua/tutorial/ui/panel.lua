@@ -16,15 +16,17 @@ local function cfg()
   return config.get()
 end
 
-function M.bar(def)
+function M.bar(session)
+  local def = session.def
+  local steps = session.steps
   local glyphs = {}
-  for _, step in ipairs(def.steps) do
+  for _, step in ipairs(steps) do
     glyphs[#glyphs + 1] = state.is_done(def.id, step.id) and "✦" or "✧"
   end
   return {
     segments = {
       { text = "  " .. table.concat(glyphs, "") .. " ", hl = "TutorialAccent" },
-      { text = ("%d/%d"):format(state.progress(def), #def.steps), hl = "TutorialKey" },
+      { text = ("%d/%d"):format(state.progress(def, steps), #steps), hl = "TutorialKey" },
     },
   }
 end
@@ -78,6 +80,16 @@ local function attach_keys(buf)
       local step = require("tutorial.ui.step")
       step.toggle_hint()
       rerender()
+    end,
+    a = function()
+      if not st.done then
+        engine.answer()
+      end
+    end,
+    r = function()
+      if not st.done then
+        engine.answer()
+      end
     end,
     d = function()
       if not st.done then
@@ -134,7 +146,7 @@ end
 -- Show (or silently refresh) the panel for a session.
 function M.open(session)
   st.session = session
-  st.done = state.progress(session.def) >= #session.def.steps
+  st.done = state.progress(session.def, session.steps) >= #session.steps
   ensure_buffer()
   ensure_window(session)
 end

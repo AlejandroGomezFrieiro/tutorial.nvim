@@ -10,7 +10,7 @@
 to take a hands-on approach to familiarizing themselves with a new plugin. Similar
 in spirit to [vim_tutor_mode](https://neovim.io/doc/user/pi_tutor/) and
 [vimtutor](https://vimschool.netlify.app/introduction/vimtutor/) but
-with a general approach to it.
+with a more generic approach to it that also includes executing commands, different interactivity etc. Props to the original tutoring!
 
 This plugin came as a sort of necessity while developing
 [storyteller.nvim](https://github.com/AlejandroGomezFrieiro/storyteller.nvim)

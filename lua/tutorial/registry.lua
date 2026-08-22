@@ -8,12 +8,20 @@
 --     layout = "card" | "split",        -- optional step display (default card)
 --     setup = function(ctx) ... end,    -- optional workspace prep; ctx persists
 --     teardown = function(ctx) ... end, -- optional cleanup on quit/finish
---     steps = {                         -- required, >= 1
+--     steps = {                         -- required list — or a function
+--                                       -- (ctx) -> list, resolved at start
 --       {
 --         id = "first-thing",           -- required, unique within tutorial
 --         title = "Do the thing",       -- required
 --         body = { "line", ... },       -- string or line list (required)
 --         hint = "Extra nudge",         -- optional, shown on h
+--         cond = function(ctx) ... end, -- optional; false skips the step
+--         enter = function(ctx) ... end,    -- optional, once on first present
+--         complete = function(ctx) ... end, -- optional, when checked off
+--         input = {                     -- optional ask-the-user step:
+--           question = "...", type = "text" | "choice", choices = {...},
+--           default = ..., store = "ctx_key", validate = fn, transform = fn,
+--         },
 --         completion = {                -- optional; any match completes the
 --           "on_command:MyThing",       --   step. Strings per checks.parse,
 --           { context = function() ... end },  -- or direct predicates.
@@ -41,6 +49,10 @@ local function validate(def)
   if not def.title or def.title == "" then
     fail(("definition %q requires a title"):format(def.id))
   end
+  if type(def.steps) == "function" then
+    -- Adaptive tours resolve their steps at start; nothing to check yet.
+    return
+  end
   if type(def.steps) ~= "table" or #def.steps == 0 then
     fail(("tutorial %q requires at least one step"):format(def.id))
   end
@@ -64,6 +76,9 @@ local function validate(def)
     end
     if step.completion ~= nil and type(step.completion) ~= "table" then
       fail(("tutorial %q step %q completion must be a list"):format(def.id, step.id))
+    end
+    if step.input ~= nil and type(step.input) ~= "table" then
+      fail(("tutorial %q step %q input must be a table"):format(def.id, step.id))
     end
   end
 end

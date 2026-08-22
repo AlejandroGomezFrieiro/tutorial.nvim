@@ -2,9 +2,13 @@
 -- Sticky, persistent progress. Completion is write-once: an event can check a
 -- step off, only `reset` un-checks it (the VS Code walkthrough model).
 --
--- Layout: <data_dir>/<tutorial-id>.json → { done = { [step_id] = os.time() } }
--- The data dir defaults to stdpath("data")/tutorial and can be overridden via
--- setup({ data_dir = ... }) or _set_dir() in tests.
+-- Layout: <data_dir>/<tutorial-id>.json →
+--   { done = { [step_id] = os.time() },          -- write-once completions
+--     answers = { [step_id] = value },           -- input-step captures
+--     vars = { [key] = value } }                 -- free-form tour variables
+-- Answers and vars are re-writable (re-answering overwrites); only `reset`
+-- clears them. The data dir defaults to stdpath("data")/tutorial and can be
+-- overridden via setup({ data_dir = ... }) or _set_dir() in tests.
 
 local M = {}
 
@@ -28,13 +32,15 @@ end
 
 local function read(id)
   if vim.fn.filereadable(path(id)) ~= 1 then
-    return { done = {} }
+    return { done = {}, answers = {}, vars = {} }
   end
   local ok, data = pcall(vim.json.decode, table.concat(vim.fn.readfile(path(id)), "\n"))
   if not ok or type(data) ~= "table" then
-    return { done = {} }
+    return { done = {}, answers = {}, vars = {} }
   end
   data.done = data.done or {}
+  data.answers = data.answers or {}
+  data.vars = data.vars or {}
   return data
 end
 
@@ -69,12 +75,14 @@ function M.mark_done(id, step_id)
 end
 
 -- Number of completed steps and the id of the first incomplete step.
--- Returns (done_count, next_step_id or nil when finished).
-function M.progress(def)
+-- Returns (done_count, next_step_id or nil when finished). `steps` overrides
+-- def.steps — callers with an active session pass the resolved (cond-
+-- filtered, possibly function-produced) list so counts match what renders.
+function M.progress(def, steps)
   local done = read(def.id).done
   local count = 0
   local next_id
-  for _, step in ipairs(def.steps) do
+  for _, step in ipairs(steps or def.steps) do
     if done[step.id] then
       count = count + 1
     elseif not next_id then
@@ -82,6 +90,28 @@ function M.progress(def)
     end
   end
   return count, next_id
+end
+
+-- Answers: input-step captures keyed by step id. Re-answering overwrites.
+function M.set_answer(id, step_id, value)
+  local data = read(id)
+  data.answers[step_id] = value
+  write(id, data)
+end
+
+function M.answer(id, step_id)
+  return read(id).answers[step_id]
+end
+
+-- Vars: free-form tutorial variables keyed by name. Re-setting overwrites.
+function M.set_var(id, key, value)
+  local data = read(id)
+  data.vars[key] = value
+  write(id, data)
+end
+
+function M.get_var(id, key)
+  return read(id).vars[key]
 end
 
 -- Reset one tutorial, or every tutorial when id is nil.

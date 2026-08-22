@@ -1,6 +1,9 @@
 -- tutorial.ui.menu
 -- The :Tutorial landing screen: every registered tutorial with its progress.
+-- Counts come from each definition's resolved step list, so adaptive tours
+-- (steps-as-function, cond) display honest totals.
 
+local engine = require("tutorial.engine")
 local registry = require("tutorial.registry")
 local state = require("tutorial.state")
 local ui = require("tutorial.ui")
@@ -22,9 +25,14 @@ function M.open()
   local select = {}
   local first_row
   for i, def in ipairs(defs) do
-    local done_count, next_id = state.progress(def)
+    -- Resolve per definition: steps may be a function of persisted ctx, and
+    -- cond-skipped steps do not count toward the total.
+    local steps = engine.resolve_steps(def, engine.context_for(def))
+    local done_count, next_id = state.progress(def, steps)
     local status
-    if not next_id then
+    if #steps == 0 then
+      status = { text = "not started", hl = "TutorialMuted" }
+    elseif not next_id then
       status = { text = "✓ complete", hl = "TutorialDone" }
     elseif done_count > 0 then
       status = { text = "in progress", hl = "TutorialAccent" }
@@ -40,7 +48,7 @@ function M.open()
       segments = {
         { text = ("  %d. "):format(i), hl = "TutorialMuted" },
         { text = def.title, hl = "TutorialKey" },
-        { text = ("  (%d/%d) "):format(done_count, #def.steps), hl = "TutorialMuted" },
+        { text = ("  (%d/%d) "):format(done_count, #steps), hl = "TutorialMuted" },
         status,
       },
     }

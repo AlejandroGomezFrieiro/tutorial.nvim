@@ -9,6 +9,7 @@
 
 local registry = require("tutorial.registry")
 local engine = require("tutorial.engine")
+local input = require("tutorial.input")
 
 local M = {}
 
@@ -16,6 +17,11 @@ M.register = registry.register
 M.start = engine.start_id
 M.active = engine.active
 M.quit = engine.quit
+-- Ergonomic helpers for adaptive tours: slug names for paths, and the input
+-- surface (capture) plus {ctx:…}/{answer:…} interpolation.
+M.slug = input.slug
+M.interpolate = input.interpolate
+M.input = input
 
 -- One-line status for statuslines: "Title 2/6" while a tutorial runs, nil
 -- otherwise.
@@ -24,8 +30,8 @@ function M.status()
   if not session then
     return nil
   end
-  local done = select(1, require("tutorial.state").progress(session.def))
-  return ("%s %d/%d"):format(session.def.title, done, #session.def.steps)
+  local done = select(1, require("tutorial.state").progress(session.def, session.steps))
+  return ("%s %d/%d"):format(session.def.title, done, #session.steps)
 end
 
 -- setup(opts): opts.data_dir overrides where progress JSON lives (tests,
@@ -91,5 +97,6 @@ M._engine = engine
 M._state = require("tutorial.state")
 M._checks = require("tutorial.checks")
 M._config = require("tutorial.config")
+M._input = input
 
 return M
