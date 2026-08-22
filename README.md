@@ -44,12 +44,16 @@ your own tutorials.
 :Tutorial reset [id]   forget progress (one, or all)
 ```
 
+While a tutorial runs it stays pinned in a split beside your work; steps
+check off without ever moving your cursor. Keys, configuration, and
+statusline integration are covered in [docs/running.md](docs/running.md).
+
 ## Creating a tutorial
 
 Run `:Tutorial authoring` for the basics, which will teach you how to write a
-tutorial called `my-first-tutorial`
+tutorial called `my-first`
 
-For more information, see [docs](docs/) 
+For more information, see [docs](docs/)
 
 ## AI disclaimer
 

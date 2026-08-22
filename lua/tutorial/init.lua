@@ -17,13 +17,26 @@ M.start = engine.start_id
 M.active = engine.active
 M.quit = engine.quit
 
+-- One-line status for statuslines: "Title 2/6" while a tutorial runs, nil
+-- otherwise.
+function M.status()
+  local session = engine.active()
+  if not session then
+    return nil
+  end
+  local done = select(1, require("tutorial.state").progress(session.def))
+  return ("%s %d/%d"):format(session.def.title, done, #session.def.steps)
+end
+
 -- setup(opts): opts.data_dir overrides where progress JSON lives (tests,
--- sandboxed profiles). Also defines the :Tutorial command.
+-- sandboxed profiles); opts.panel_position / opts.panel_width configure the
+-- pinned walkthrough panel. Also defines the :Tutorial command.
 function M.setup(opts)
   opts = opts or {}
   if opts.data_dir then
     require("tutorial.state")._set_dir(opts.data_dir)
   end
+  require("tutorial.config").setup(opts)
 
   vim.api.nvim_create_user_command("Tutorial", function(args)
     local sub = args.args ~= "" and vim.split(args.args, "%s+")[1] or nil
@@ -42,8 +55,15 @@ function M.setup(opts)
       M.start(sub)
       return
     end
-    if engine.active() then
-      require("tutorial.ui.step").open(engine.active())
+    local active = engine.active()
+    if active then
+      -- Re-invoking while running focuses (or toggles) the pinned panel;
+      -- card-mode tutorials re-open their card instead.
+      if active.def.layout == "card" then
+        require("tutorial.ui.step").open(active)
+      else
+        require("tutorial.ui.panel").toggle(active)
+      end
       return
     end
     require("tutorial.ui.menu").open()
@@ -70,5 +90,6 @@ M._registry = registry
 M._engine = engine
 M._state = require("tutorial.state")
 M._checks = require("tutorial.checks")
+M._config = require("tutorial.config")
 
 return M

@@ -1,7 +1,6 @@
 -- tutorial.ui.step
--- The step card: title, progress bar, body, optional hint, and the nav keys.
--- Tutorials with layout = "split" get a Codecademy-style instructions pane on
--- the left with the workspace kept on the right.
+-- Step-card content shared by the pinned panel and the full-window card, plus
+-- the legacy full-window presentation (layout = "card").
 
 local engine = require("tutorial.engine")
 local state = require("tutorial.state")
@@ -10,6 +9,11 @@ local ui = require("tutorial.ui")
 local M = {}
 
 local show_hint = false
+
+-- Hint visibility is shared between the full-window card and the panel.
+function M.toggle_hint()
+  show_hint = not show_hint
+end
 
 -- Render `{key:X}` tokens as highlighted key hints. `X` containing spaces is
 -- prose (a description), not a keymap name, and renders muted instead.
@@ -39,9 +43,8 @@ local function key_segments(text)
   return { segments = segments }
 end
 
-local function bar(def)
+function M.bar(def)
   local done_count = state.progress(def)
-  local total = #def.steps
   local glyphs = {}
   for _, step in ipairs(def.steps) do
     glyphs[#glyphs + 1] = state.is_done(def.id, step.id) and "✦" or "✧"
@@ -49,17 +52,20 @@ local function bar(def)
   return {
     segments = {
       { text = "  " .. table.concat(glyphs, "") .. " ", hl = "TutorialAccent" },
-      { text = ("%d/%d"):format(done_count, total), hl = "TutorialKey" },
+      { text = ("%d/%d"):format(done_count, #def.steps), hl = "TutorialKey" },
     },
   }
 end
 
-function M.open(session)
+-- The card content for the current step of a session. opts.panel adds the
+-- [s]hide hint used by the pinned panel.
+function M.lines(session, opts)
+  opts = opts or {}
   local def = session.def
   local step = def.steps[session.index]
   local entries = {
     { text = "  ✦  " .. string.upper(def.title), hl = "TutorialTitle" },
-    bar(def),
+    M.bar(def),
     {
       segments = {
         { text = ("  Step %d — "):format(session.index), hl = "TutorialAccent" },
@@ -77,9 +83,15 @@ function M.open(session)
     entries[#entries + 1] = { text = "  Hint: " .. step.hint, hl = "TutorialCardMeta" }
   end
   entries[#entries + 1] = { text = "" }
-  entries[#entries + 1] = ui.footer("[n]ext [p]rev [h]int d(one) q(uit)")
+  entries[#entries + 1] =
+    ui.footer("[n]ext [p]rev [h]int d(one)" .. (opts.panel and " [s]hide" or "") .. " q(uit)")
+  return entries
+end
 
-  local buf = ui.scratch("step", entries)
+-- Full-window presentation (layout = "card"). Reuses its window so advances
+-- never stack splits.
+function M.open(session)
+  local buf = ui.scratch("step", M.lines(session))
   local keys = {
     n = function()
       show_hint = false
@@ -102,17 +114,17 @@ function M.open(session)
       engine.quit()
     end,
   }
-  -- Keymaps attach before display: showing the buffer fires BufEnter, and a
-  -- same-tick completion must never find this buffer half-initialized.
+  -- Keymaps attach before display: showing the buffer can fire BufEnter, and
+  -- a same-tick completion must never find this buffer half-initialized.
   for lhs, fn in pairs(keys) do
     vim.keymap.set("n", lhs, fn, { buffer = buf, silent = true, nowait = true })
   end
-  ui.show(buf, { split = def.layout == "split" })
+  ui.show(buf, { reuse_key = "card" })
 end
 
 function M.close()
   show_hint = false
-  ui.close_all()
+  ui.close_win("card")
 end
 
 return M

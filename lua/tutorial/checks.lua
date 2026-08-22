@@ -70,6 +70,15 @@ local function escape_pattern(s)
   return (s:gsub("[%c%.%+%-%*%?%[%]%(%$%^%%]", "%%%0"))
 end
 
+-- Anchor a relative path/glob to the working directory captured at session
+-- start; absolute paths pass through untouched.
+local function anchored(path, cwd)
+  if not cwd or path:sub(1, 1) == "/" then
+    return path
+  end
+  return cwd .. "/" .. path:gsub("^%./", "")
+end
+
 -- Evaluate one parsed spec. `trigger` carries optional event payload:
 --   trigger.command — the executed Ex command line (command specs)
 --   trigger.event   — the fired User pattern (event specs)
@@ -90,9 +99,10 @@ function M.evaluate(parsed, trigger)
     local name = vim.api.nvim_buf_get_name(trigger.buf or 0)
     return name ~= "" and name:find(parsed.arg) ~= nil
   elseif kind == "file_exists" then
-    return #vim.fn.glob(vim.fn.expand(parsed.arg), false, true) > 0
+    local glob = anchored(vim.fn.expand(parsed.arg), trigger.cwd)
+    return #vim.fn.glob(glob, false, true) > 0
   elseif kind == "file_contains" then
-    local path = vim.fn.expand(parsed.path)
+    local path = anchored(vim.fn.expand(parsed.path), trigger.cwd)
     if vim.fn.filereadable(path) ~= 1 then
       return false
     end

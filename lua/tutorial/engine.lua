@@ -9,6 +9,10 @@
 --   BufEnter     → on_buffer edge specs + state poll
 --   BufWritePost → state poll
 --   CursorHold   → state poll
+--
+-- Presentation: layout "card" renders full-window cards (reused window);
+-- anything else — the default — pins the walkthrough panel beside the
+-- workspace and never moves the user's focus.
 
 local registry = require("tutorial.registry")
 local state = require("tutorial.state")
@@ -16,7 +20,7 @@ local checks = require("tutorial.checks")
 
 local M = {}
 
-local session -- { def, index, ctx, group } or nil
+local session -- { def, index, ctx, cwd, prev_win } or nil
 local advancing -- guards against re-entrant evaluation while a completion is
 -- being processed (rendering the next card fires BufEnter, which would
 -- otherwise evaluate again and delete the buffer mid-render)
@@ -32,20 +36,43 @@ local function notify(msg, level)
   vim.notify("[tutorial] " .. msg, level or vim.log.levels.INFO)
 end
 
-local ui ---@type table lazy-required on first render to break load cycles
+local function panel_mode()
+  return session ~= nil and session.def.layout ~= "card"
+end
+
+-- Route the current step to its surface: pinned panel or full-window card.
+local function present()
+  if not session then
+    return
+  end
+  if panel_mode() then
+    require("tutorial.ui.panel").update(session)
+  else
+    require("tutorial.ui.step").open(session)
+  end
+end
 
 local function finish_step(step_id)
   state.mark_done(session.def.id, step_id)
   local done_count = select(1, state.progress(session.def))
   notify(("✓ %s (%d/%d)"):format(step().title, done_count, #session.def.steps))
   if done_count >= #session.def.steps then
-    if session.def.teardown then
-      pcall(session.def.teardown, session.ctx)
-    end
     local def = session.def
+    local prev_win = session.prev_win
+    if def.teardown then
+      pcall(def.teardown, session.ctx)
+    end
     session = nil
     vim.api.nvim_del_augroup_by_name("tutorial_hub")
-    require("tutorial.ui.done").open(def)
+    if def.layout == "card" then
+      require("tutorial.ui.done").open(def)
+    else
+      require("tutorial.ui.panel").finish(def)
+      -- The panel never steals focus; keep it that way at finish too.
+      if prev_win and vim.api.nvim_win_is_valid(prev_win) then
+        pcall(vim.api.nvim_set_current_win, prev_win)
+      end
+    end
     return
   end
   -- Advance to the next incomplete step.
@@ -55,8 +82,7 @@ local function finish_step(step_id)
       break
     end
   end
-  ui = ui or require("tutorial.ui.step")
-  ui.open(session)
+  present()
 end
 
 local function run_completion(step_id)
@@ -69,11 +95,14 @@ local function run_completion(step_id)
 end
 
 -- Evaluate every check for the active step. Edge triggers pass a payload;
--- state predicates are always polled.
+-- state predicates are always polled. Relative file specs resolve against the
+-- working directory captured when the session started.
 local function evaluate(trigger)
   if not session or advancing then
     return false
   end
+  trigger = trigger or {}
+  trigger.cwd = session.cwd
   local current = step()
   for _, spec in ipairs(checks.specs(current)) do
     if checks.evaluate(spec, trigger) then
@@ -158,7 +187,8 @@ function M.start(def)
     def = def,
     index = 1,
     ctx = {},
-    group = nil,
+    cwd = vim.fn.getcwd(),
+    prev_win = vim.api.nvim_get_current_win(),
   }
   if def.setup then
     local ok, err = pcall(def.setup, session.ctx)
@@ -180,8 +210,11 @@ function M.start(def)
     return nil
   end
   ensure_hub()
-  ui = ui or require("tutorial.ui.step")
-  ui.open(session)
+  present()
+  -- The surface may have created windows; focus belongs to the workspace.
+  if session.prev_win and vim.api.nvim_win_is_valid(session.prev_win) then
+    pcall(vim.api.nvim_set_current_win, session.prev_win)
+  end
   return session
 end
 
@@ -194,7 +227,8 @@ function M.start_id(id)
   return M.start(def)
 end
 
--- Stop following along. Progress already earned stays earned.
+-- Stop following along. Progress already earned stays earned; only this
+-- tutorial's surfaces close.
 -- silent=true suppresses the notification (used when switching).
 function M.quit(silent)
   if not session then
@@ -206,8 +240,13 @@ function M.quit(silent)
   if session.def.teardown then
     pcall(session.def.teardown, session.ctx)
   end
+  local was_panel = panel_mode()
   session = nil
-  require("tutorial.ui.step").close()
+  if was_panel then
+    require("tutorial.ui.panel").close()
+  else
+    require("tutorial.ui.step").close()
+  end
   if not silent then
     notify("Tutorial paused — progress saved. Resume with :Tutorial.")
   end
@@ -223,8 +262,7 @@ function M.goto_step(delta)
     return
   end
   session.index = target
-  ui = ui or require("tutorial.ui.step")
-  ui.open(session)
+  present()
 end
 
 return M

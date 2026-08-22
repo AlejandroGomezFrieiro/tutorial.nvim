@@ -18,6 +18,26 @@ local registry = tutorial._registry
 local engine = tutorial._engine
 local state = tutorial._state
 local checks = tutorial._checks
+local panel = require("tutorial.ui.panel")
+
+local function panel_lines()
+  local buf = panel.buffer()
+  assert_true(buf ~= nil and vim.api.nvim_buf_is_valid(buf), "panel buffer present")
+  return table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
+end
+
+local function panel_windows()
+  local out = {}
+  for _, win in ipairs(vim.api.nvim_list_wins()) do
+    if vim.api.nvim_win_is_valid(win) then
+      local name = vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(win))
+      if name:find("tutorial://panel", 1, true) == 1 then
+        out[#out + 1] = win
+      end
+    end
+  end
+  return out
+end
 
 -- Isolated data dir per run.
 state._set_dir(vim.fn.tempname() .. "/progress")
@@ -379,10 +399,11 @@ assert_true(state.is_done("authoring", "register"), "authoring: registry sees my
 engine.done()
 assert_true(engine.active() == nil, "authoring tour finishes cleanly")
 
--- The payoff: the tutorial the user just wrote runs on the real engine.
+-- The payoff: the tutorial the user just wrote runs on the real engine —
+-- pinned in the panel, since it declares no layout.
 session = engine.start_id("my-first")
 assert_true(session ~= nil, "user-written tutorial starts")
-lines = table.concat(vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(0), 0, -1, false), "\n")
+lines = panel_lines()
 assert_true(
   lines:find("MY FIRST TUTORIAL", 1, true) ~= nil and lines:find("Say hi", 1, true) ~= nil,
   "user-written card renders its own title"
@@ -454,6 +475,166 @@ press_cr()
 assert_true(
   engine.active() ~= nil and engine.active().def.id == "one",
   "menu opens with cursor ready on the first entry"
+)
+engine.quit(true)
+
+-- -- --- Pinned panel ------------------------------------------------------------
+
+registry._clear()
+state._set_dir(vim.fn.tempname() .. "/progress7")
+-- Section hygiene: earlier tours leave their panels pinned; collapse to a
+-- single clean window.
+vim.cmd("silent! only!")
+local pin_flag = false
+registry.register({
+  id = "pinned",
+  title = "Pinned",
+  -- no layout field: defaults to the pinned panel
+  steps = {
+    {
+      id = "p1",
+      title = "First",
+      body = { "flag step" },
+      completion = {
+        {
+          context = function()
+            return pin_flag
+          end,
+        },
+      },
+    },
+    { id = "p2", title = "Second", body = { "manual" } },
+    {
+      id = "p3",
+      title = "Third",
+      body = { "anchored file" },
+      completion = { "on_file_exists:rel-marker.txt" },
+    },
+  },
+})
+
+-- Work in an isolated cwd for the anchoring checks below.
+local pdir = vim.fn.tempname()
+vim.fn.mkdir(pdir .. "/work", "p")
+vim.cmd("cd " .. vim.fn.fnameescape(pdir))
+
+local ws_win = vim.api.nvim_get_current_win()
+local ws_buf = vim.api.nvim_win_get_buf(ws_win)
+local ws_row = vim.api.nvim_win_get_cursor(ws_win)[1]
+
+session = engine.start_id("pinned")
+assert_true(panel.visible(), "panel visible after start")
+assert_true(vim.api.nvim_get_current_win() == ws_win, "start does not steal focus")
+assert_true(vim.api.nvim_win_get_buf(ws_win) == ws_buf, "workspace buffer untouched")
+
+lines = panel_lines()
+assert_true(
+  lines:find("PINNED", 1, true) ~= nil and lines:find("First", 1, true) ~= nil,
+  "panel renders current step"
+)
+
+-- Advancing updates the same window in place; focus and cursor stay put.
+assert_true(#panel_windows() == 1, "exactly one panel window")
+pin_flag = true
+engine._evaluate({})
+assert_true(state.is_done("pinned", "p1"), "pinned: predicate completes first step")
+assert_true(#panel_windows() == 1, "advance creates no extra windows")
+assert_true(vim.api.nvim_get_current_win() == ws_win, "advance keeps focus in workspace")
+assert_true(vim.api.nvim_win_get_cursor(ws_win)[1] == ws_row, "workspace cursor untouched")
+
+-- Hiding via :Tutorial toggle, then back.
+vim.cmd("Tutorial")
+assert_true(not panel.visible(), ":Tutorial hides a visible panel")
+assert_true(vim.api.nvim_get_current_win() == ws_win, "hiding keeps focus in workspace")
+vim.cmd("Tutorial")
+assert_true(panel.visible(), ":Tutorial brings the panel back")
+
+-- Closing the window by hand: the next advance recreates it.
+local old_panel_win = panel_windows()[1]
+vim.api.nvim_win_close(old_panel_win, true)
+assert_true(not panel.visible(), "hand-closed panel is gone")
+engine.goto_step(1)
+assert_true(panel.visible() and #panel_windows() == 1, "panel recreated on next update")
+assert_true(panel_windows()[1] ~= old_panel_win, "recreated panel is a fresh window")
+
+-- Relative file specs anchor to the session's start cwd, not live cwd.
+state.mark_done("pinned", "p2")
+engine.goto_step(1)
+assert_true(session.index == 3, "navigated to third step")
+vim.fn.mkdir(pdir .. "/elsewhere", "p")
+vim.cmd("cd " .. vim.fn.fnameescape(pdir .. "/elsewhere"))
+engine._evaluate({})
+assert_true(not state.is_done("pinned", "p3"), "anchored spec ignores unrelated cwd")
+vim.fn.writefile({ "x" }, pdir .. "/rel-marker.txt")
+engine._evaluate({})
+assert_true(state.is_done("pinned", "p3"), "relative spec resolves against session cwd")
+
+-- Finish: summary lives in the panel, focus stays, q dismisses and closes.
+assert_true(engine.active() == nil, "pinned tutorial finished cleanly")
+assert_true(panel.visible(), "done summary stays visible in panel")
+assert_true(vim.api.nvim_get_current_win() == ws_win, "finish keeps workspace focused")
+lines = panel_lines()
+assert_true(lines:find("TUTORIAL COMPLETE", 1, true) ~= nil, "panel shows completion summary")
+
+local panel_win = panel_windows()[1]
+vim.api.nvim_set_current_win(panel_win)
+vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("q", true, false, true), "mx", false)
+assert_true(not panel.visible(), "q dismisses the finished panel")
+assert_true(vim.api.nvim_get_current_win() == ws_win, "dismissal returns focus to the workspace")
+
+-- status() while idle vs running.
+assert_true(tutorial.status() == nil, "status is nil when idle")
+state.reset("pinned")
+session = engine.start_id("pinned")
+assert_true(
+  tutorial.status() == "Pinned 0/3",
+  ("status reports title and progress (got %q)"):format(tostring(tutorial.status()))
+)
+engine.done()
+assert_true(tutorial.status() == "Pinned 1/3", "status tracks completed steps")
+
+-- Quitting only owns its own surfaces: a menu open elsewhere survives.
+require("tutorial.ui.menu").open()
+local menu_buffer = vim.api.nvim_win_get_buf(0)
+assert_true(
+  vim.api.nvim_buf_get_name(menu_buffer):find("tutorial://menu", 1, true) == 1,
+  "menu opened"
+)
+-- start replaces session; menu window stays where it is.
+engine.quit(true)
+assert_true(vim.api.nvim_buf_is_valid(menu_buffer), "quit does not wipe an open menu")
+
+-- Card mode reuses one window: no accumulation across advances.
+vim.cmd("silent! only!")
+local function card_windows()
+  local out = {}
+  for _, win in ipairs(vim.api.nvim_list_wins()) do
+    if vim.api.nvim_win_is_valid(win) then
+      local name = vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(win))
+      if name:find("tutorial://step", 1, true) == 1 then
+        out[#out + 1] = win
+      end
+    end
+  end
+  return out
+end
+registry.register({
+  id = "carded",
+  title = "Carded",
+  layout = "card",
+  steps = {
+    { id = "c1", title = "C1", body = { "b" } },
+    { id = "c2", title = "C2", body = { "b" } },
+  },
+})
+engine.start_id("carded")
+assert_true(#card_windows() == 1, "card renders once at start")
+local windows_at_start = #vim.api.nvim_list_wins()
+engine.done()
+assert_true(#card_windows() == 1, "advance reuses the card window")
+assert_true(
+  #vim.api.nvim_list_wins() == windows_at_start,
+  "advancing creates no new windows in card mode"
 )
 engine.quit(true)
 

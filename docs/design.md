@@ -31,10 +31,18 @@ hard to reuse.
    plugins ship definitions, not listeners.
 5. **Calm.** One card at a time, no timers, no floating chrome. The tutorial
    is a colleague pointing at your screen, not a circus.
+6. **Focus belongs to the user.** A running tutorial pins its panel and
+   updates it silently; advancing never moves the cursor, swaps the workspace
+   buffer, or steals the window. Deliberate actions (`s`, `:Tutorial`) are
+   the only things that bring the panel forward.
 
 ## Mechanics worth knowing
 
-- Completion evaluation is **scheduled off-tick**: rendering a card fires
+- Every tutorial surface (pinned panel, card, menu, done screen) owns its
+  window through a reuse registry: updates render into the registered window
+  when it still exists and recreate it only when closed. This is what makes
+  "pinned" possible and what keeps advances from stacking splits.
+- Completion evaluation is **scheduled off-tick**: rendering a panel fires
   BufEnter, and completing a step mid-render would swap buffers under the
   renderer's feet. The hub defers, then guards against re-entrancy.
 - Command observation happens on `CmdlineLeave`; matching is by leading

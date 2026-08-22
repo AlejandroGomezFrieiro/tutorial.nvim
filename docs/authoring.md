@@ -37,12 +37,33 @@ built-in tour writes, registers, and runs a real tutorial alongside you.
 | --- | --- | --- |
 | `id` | yes | stable identifier; progress is keyed on it |
 | `title` | yes | card heading |
+| `layout` | no | `"split"` (default): steps pin in a panel beside the workspace; `"card"`: full-window stepping |
+| `setup` | no | `function(ctx)` — runs once at start; `ctx` is yours (baselines, paths) |
+| `teardown` | no | `function(ctx)` — runs on quit or completion |
+| `summary` | no | one-liner shown in the menu |
+| `steps` | yes | ordered step tables below |
+
+Re-registering an id replaces the definition in place, which keeps its menu
+position — useful while iterating.
+
+### Steps
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `id` | yes | stable identifier within the tutorial |
+| `title` | yes | card heading |
 | `body` | yes | string or list of lines; see [Body text](#body-text) |
 | `hint` | no | extra nudge revealed by `h` |
 | `completion` | no | spec list below; omit for manual-only steps |
 
-Re-registering an id replaces the definition in place, which keeps its menu
-position — useful while iterating.
+### The pinned panel
+
+By default a running tutorial docks a panel (left, 42 columns — user-
+configurable via `setup({ panel_position = ..., panel_width = ... })`) and
+updates it silently as steps complete. **Focus is never taken**: write your
+step bodies assuming the user is looking at their prose, not your card.
+Users hide/show with `s`, or by re-running `:Tutorial`. Set
+`layout = "card"` only for tutorials that must own the whole screen.
 
 ## Completion specs
 
@@ -67,6 +88,9 @@ Notes:
 - `on_file_contains` splits path from pattern at the *first* colon after the
   prefix; patterns are Lua patterns, not regex.
 - Predicates are wrapped in `pcall`: an erroring check is false, not fatal.
+- Relative `on_file_exists` / `on_file_contains` paths anchor to the working
+  directory captured when the tutorial started — a `setup` that relocates the
+  user cannot break them. Absolute paths pass through untouched.
 - Prefer the narrowest spec that tells the truth. A step that checks real
   state teaches more than one anyone can pass blind — but keep `d` in mind as
   the universal fallback.

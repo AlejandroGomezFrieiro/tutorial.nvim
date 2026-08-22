@@ -29,7 +29,12 @@ COMMANDS                                                        *tutorial-comman
 Step card keys:                                        *tutorial-step-keys*
     n  view next step            p  view previous step
     h  toggle the hint           d  mark this step done
+    s  hide/show the pinned panel
     q  pause (progress saved)
+
+While a tutorial runs it is pinned in a split beside your work; completing
+a step updates the panel without moving your focus. Re-running :Tutorial
+hides or restores the panel. Statuslines can read |tutorial-status()|.
 
 ==============================================================================
 AUTHORING                                                     *tutorial-authoring*
@@ -80,5 +85,11 @@ write-once; only |:Tutorial-reset| un-completes steps.
 
 setup({opts})                                                *tutorial-setup*
     Defines :Tutorial. `opts.data_dir` overrides the progress directory.
+    `opts.panel_position` ("left"/"right") and `opts.panel_width` (default
+    42) configure the pinned panel.
+
+status()                                              *tutorial-status()*
+    "Title n/m" while a tutorial runs, nil otherwise. Intended for
+    statuslines.
 
 vim:tw=78:ts=8:ft=help:norl:
