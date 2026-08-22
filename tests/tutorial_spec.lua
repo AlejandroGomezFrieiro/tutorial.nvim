@@ -395,5 +395,67 @@ state.reset("authoring")
 vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))
 vim.fn.delete(adir, "rf")
 
+-- --- Menu selection regression -----------------------------------------------
+
+-- Rows are selected by cursor line number; headers and summaries must not
+-- desync them from the tutorial order.
+registry._clear()
+state._set_dir(vim.fn.tempname() .. "/progress6")
+registry.register({
+  id = "one",
+  title = "One",
+  summary = "has a summary line",
+  steps = { { id = "s", title = "S", body = "b" } },
+})
+registry.register({
+  id = "two",
+  title = "Two",
+  steps = { { id = "s", title = "S", body = "b" } },
+})
+
+local function open_menu()
+  require("tutorial.ui.menu").open()
+  local buf = vim.api.nvim_win_get_buf(0)
+  return buf, vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+end
+
+local function row_of(menu_lines, pat)
+  for i, ln in ipairs(menu_lines) do
+    if ln:find(pat, 1, true) then
+      return i
+    end
+  end
+end
+
+local function press_cr()
+  vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<CR>", true, false, true), "mx", false)
+end
+
+local _, lines_menu = open_menu()
+vim.api.nvim_win_set_cursor(0, { row_of(lines_menu, "Two"), 0 })
+press_cr()
+assert_true(
+  engine.active() ~= nil and engine.active().def.id == "two",
+  "menu <CR> starts the tutorial under the cursor"
+)
+engine.quit(true)
+
+_, lines_menu = open_menu()
+vim.api.nvim_win_set_cursor(0, { row_of(lines_menu, "has a summary"), 0 })
+press_cr()
+assert_true(
+  engine.active() ~= nil and engine.active().def.id == "one",
+  "menu <CR> works on summary lines"
+)
+engine.quit(true)
+
+open_menu()
+press_cr()
+assert_true(
+  engine.active() ~= nil and engine.active().def.id == "one",
+  "menu opens with cursor ready on the first entry"
+)
+engine.quit(true)
+
 print(("RESULT: %d passed, %d failed"):format(passed, failed))
 os.exit(failed == 0 and 0 or 1)

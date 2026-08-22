@@ -14,11 +14,13 @@ function M.open()
     return
   end
 
+  -- Entries append one buffer line each; record which line selects what.
   local entries = {
     { text = "  ✦  TUTORIALS", hl = "TutorialTitle" },
     { text = "" },
   }
   local select = {}
+  local first_row
   for i, def in ipairs(defs) do
     local done_count, next_id = state.progress(def)
     local status
@@ -29,6 +31,11 @@ function M.open()
     else
       status = { text = "not started", hl = "TutorialMuted" }
     end
+
+    select[#entries + 1] = def
+    if not first_row then
+      first_row = #entries + 1 -- the row the title line is about to occupy
+    end
     entries[#entries + 1] = {
       segments = {
         { text = ("  %d. "):format(i), hl = "TutorialMuted" },
@@ -37,10 +44,12 @@ function M.open()
         status,
       },
     }
+
     if def.summary then
+      -- The summary line belongs to the same tutorial.
+      select[#entries + 1] = def
       entries[#entries + 1] = { text = "     " .. def.summary, hl = "TutorialCardMeta" }
     end
-    select[i] = def
   end
   entries[#entries + 1] = { text = "" }
   entries[#entries + 1] = ui.footer("<CR> start/resume   r reset   q close")
@@ -48,16 +57,21 @@ function M.open()
   local buf = ui.scratch("menu", entries)
   ui.show(buf)
 
+  -- Land on the first selectable row so <CR> works immediately.
+  vim.api.nvim_win_set_cursor(0, { first_row or 1, 0 })
+
+  local function row_def()
+    return select[vim.api.nvim_win_get_cursor(0)[1]]
+  end
+
   vim.keymap.set("n", "<CR>", function()
-    local row = vim.api.nvim_win_get_cursor(0)[1]
-    local def = select[row]
+    local def = row_def()
     if def then
       require("tutorial.engine").start(def)
     end
   end, { buffer = buf, silent = true })
   vim.keymap.set("n", "r", function()
-    local row = vim.api.nvim_win_get_cursor(0)[1]
-    local def = select[row]
+    local def = row_def()
     if not def then
       return
     end

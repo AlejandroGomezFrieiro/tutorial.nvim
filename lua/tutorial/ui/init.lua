@@ -89,6 +89,7 @@ function M.show(buf, opts)
   vim.wo.number = false
   vim.wo.relativenumber = false
   vim.wo.signcolumn = "no"
+  vim.wo.cursorline = true -- visible selection on list-style buffers
   vim.wo.fillchars = "eob: "
   for lhs, fn in pairs(opts.keys or {}) do
     vim.keymap.set("n", lhs, fn, { buffer = buf, silent = true, nowait = true })
