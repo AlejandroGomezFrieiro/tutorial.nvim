@@ -2,3 +2,5 @@ result
 result-*
 build/
 .direnv/
+
+my-tutorial.lua
