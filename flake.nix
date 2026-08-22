@@ -3,11 +3,52 @@
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
+    # The demo build rides on the author's own Neovim configuration — the
+    # local checkout next to this repo. Nix cannot take a `path:../…` input
+    # from a git-tree flake (the source is copied into the store, where `..`
+    # dangles), so the sibling repo is pinned by its local git URL instead.
+    nixvim.url = "github:nix-community/nixvim";
+    nixvim.inputs.nixpkgs.follows = "nixpkgs";
+    nixvim_config.url = "git+file:///home/alejandro/nixvim_config";
+    nixvim_config.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = inputs @ {self, nixpkgs, ...}: let
+  outputs = inputs @ {
+    self,
+    nixpkgs,
+    nixvim,
+    nixvim_config,
+    ...
+  }: let
     forAllSystems = nixpkgs.lib.genAttrs nixpkgs.lib.systems.flakeExposed;
     version = "0.1.0";
+
+    # Demo Neovim: the full personal config from ../nixvim_config as the
+    # default configuration, with this plugin dropped onto the runtimepath.
+    # Only exposed as an app/devShell — `nix flake check` builds every
+    # package, and this one is far too heavy for CI.
+    demoNvim = system:
+      nixvim.legacyPackages.${system}.makeNixvimWithModule {
+        pkgs = import nixpkgs {
+          inherit system;
+          config.allowUnfreePredicate = pkg:
+            builtins.elem (pkg.pname or pkg.name) ["blink-cmp-spell"];
+        };
+        module = {
+          imports = [nixvim_config.nixosModules.default];
+          # Classic command line for the recording; noice/image float over
+          # the walkthrough panel and hide what the demo is showing.
+          nixvim-config.ui.noice.enable = false;
+          nixvim-config.ui.image.enable = false;
+          # Wider walkthrough panel so step titles and key hints don't wrap
+          # mid-word on camera (plugin/tutorial.lua re-setup()s bare, which
+          # is a no-op merge and leaves this standing).
+          extraConfigLua = ''
+            require("tutorial").setup({panel_width = 54})
+          '';
+          extraPlugins = [self.packages.${system}.default];
+        };
+      };
   in {
     # The plugin as a Neovim-loadable package (runtimepath source):
     # lazy.nvim:  { dir = tutorial-nvim }
@@ -66,6 +107,16 @@
       };
     });
 
+    # `nix run .#demo` opens Neovim running the author's config with
+    # tutorial.nvim loaded.
+    apps = forAllSystems (system: rec {
+      demo = {
+        type = "app";
+        program = "${demoNvim system}/bin/nvim";
+      };
+      default = demo;
+    });
+
     devShells = forAllSystems (system: let
       pkgs = nixpkgs.legacyPackages.${system};
     in {
@@ -75,6 +126,16 @@
           # Lint/format for CI parity.
           pkgs.stylua
           pkgs.luajitPackages.luacheck
+        ];
+      };
+
+      # Re-record docs/demo.gif: `nix develop .#demo -c vhs demo.tape`
+      demo = pkgs.mkShell {
+        packages = [
+          (demoNvim system)
+          pkgs.vhs
+          pkgs.tmux
+          pkgs.ffmpeg
         ];
       };
     });
