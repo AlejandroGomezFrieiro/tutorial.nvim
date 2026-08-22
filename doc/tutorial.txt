@@ -1,0 +1,84 @@
+*tutorial.txt*  A generic interactive walkthrough engine for Neovim
+
+Author: AlejandroGomezFrieiro
+License: MIT
+
+==============================================================================
+INTRODUCTION                                                    *tutorial.nvim*
+
+tutorial.nvim lets plugins ship interactive tutorials: ordered steps with
+completion events that check off as the user actually performs them. Users
+open everything through |:Tutorial|. It generalizes vimtutor beyond a single
+document: multi-step, resumable, contributed by any plugin.
+
+==============================================================================
+COMMANDS                                                        *tutorial-commands*
+
+:Tutorial [id]                                                      *:Tutorial*
+    Without an id, open the tutorial menu. With an id, start or resume that
+    tutorial. While a session is active, re-opening shows the current step.
+
+    A built-in tour, "Hello, tutorial.nvim" (id `hello`), walks through every
+    completion mechanism by completing its steps in different ways — the
+    engine's own proof of life.
+
+:Tutorial reset [id]                                          *:Tutorial-reset*
+    Forget sticky progress. With an id, reset that tutorial only; without,
+    reset every tutorial.
+
+Step card keys:                                        *tutorial-step-keys*
+    n  view next step            p  view previous step
+    h  toggle the hint           d  mark this step done
+    q  pause (progress saved)
+
+==============================================================================
+AUTHORING                                                     *tutorial-authoring*
+
+Plugins register definitions at load time: >
+
+    require("tutorial").register({
+      id = "my-plugin-basics",
+      title = "Getting started",
+      summary = "Optional one-liner for menus",
+      layout = "card",                 -- or "split"
+      setup = function(ctx) end,       -- optional workspace prep
+      teardown = function(ctx) end,    -- optional cleanup
+      steps = {
+        {
+          id = "step-one",
+          title = "Do the thing",
+          body = { "Press {key:<leader>x}." },
+          hint = "Shown when the user presses h",
+          completion = {
+            "on_command:MyThing",
+            { context = function() return vim.g.thing_ran end },
+          },
+        },
+      },
+    })
+<
+
+Completion specs ~                                            *tutorial-events*
+
+Any spec matching completes the step; manual `d` always works. The long-form
+authoring guide lives in `docs/authoring.md` in the repository.
+
+    on_command:Name [args…]   An Ex command line whose leading word is Name.
+    on_event:Pattern          A |User| autocmd fired with this pattern.
+    on_buffer:pattern         A buffer opened whose path matches the Lua pattern.
+    on_file_exists:glob       The glob expands to at least one path.
+    on_file_contains:p:pat    The readable file p contains Lua pattern pat.
+    { context = fn }          A predicate called with no arguments.
+
+Body text ~                                              *tutorial-body*
+Body lines are strings. `{key:X}` tokens render as key hints; tokens
+containing spaces are treated as prose descriptions instead of mappings.
+
+Progress storage ~                                  *tutorial-persistence*
+Sticky JSON under `stdpath("data")/tutorial/<id>.json`. Completion is
+write-once; only |:Tutorial-reset| un-completes steps.
+
+setup({opts})                                                *tutorial-setup*
+    Defines :Tutorial. `opts.data_dir` overrides the progress directory.
+
+vim:tw=78:ts=8:ft=help:norl:

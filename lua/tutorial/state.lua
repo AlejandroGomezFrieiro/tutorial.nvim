@@ -1,0 +1,104 @@
+-- tutorial.state
+-- Sticky, persistent progress. Completion is write-once: an event can check a
+-- step off, only `reset` un-checks it (the VS Code walkthrough model).
+--
+-- Layout: <data_dir>/<tutorial-id>.json → { done = { [step_id] = os.time() } }
+-- The data dir defaults to stdpath("data")/tutorial and can be overridden via
+-- setup({ data_dir = ... }) or _set_dir() in tests.
+
+local M = {}
+
+local data_dir
+
+M._set_dir = function(dir)
+  data_dir = dir
+end
+
+local function dir()
+  if data_dir then
+    return data_dir
+  end
+  data_dir = vim.fn.stdpath("data") .. "/tutorial"
+  return data_dir
+end
+
+local function path(id)
+  return dir() .. "/" .. id .. ".json"
+end
+
+local function read(id)
+  if vim.fn.filereadable(path(id)) ~= 1 then
+    return { done = {} }
+  end
+  local ok, data = pcall(vim.json.decode, table.concat(vim.fn.readfile(path(id)), "\n"))
+  if not ok or type(data) ~= "table" then
+    return { done = {} }
+  end
+  data.done = data.done or {}
+  return data
+end
+
+local function write(id, data)
+  vim.fn.mkdir(dir(), "p")
+  local lines = { vim.json.encode(data) }
+  vim.fn.writefile(lines, path(id))
+end
+
+function M.load(id)
+  return read(id)
+end
+
+-- True when any sticky progress exists for the tutorial.
+function M.has_progress(id)
+  return vim.fn.filereadable(path(id)) == 1
+end
+
+function M.is_done(id, step_id)
+  return read(id).done[step_id] ~= nil
+end
+
+-- Mark a step complete. Sticky: later calls are no-ops.
+function M.mark_done(id, step_id)
+  local data = read(id)
+  if data.done[step_id] then
+    return false
+  end
+  data.done[step_id] = os.time()
+  write(id, data)
+  return true
+end
+
+-- Number of completed steps and the id of the first incomplete step.
+-- Returns (done_count, next_step_id or nil when finished).
+function M.progress(def)
+  local done = read(def.id).done
+  local count = 0
+  local next_id
+  for _, step in ipairs(def.steps) do
+    if done[step.id] then
+      count = count + 1
+    elseif not next_id then
+      next_id = step.id
+    end
+  end
+  return count, next_id
+end
+
+-- Reset one tutorial, or every tutorial when id is nil.
+function M.reset(id)
+  if id then
+    if vim.fn.filereadable(path(id)) == 1 then
+      vim.fn.delete(path(id))
+      return true
+    end
+    return false
+  end
+  local removed = 0
+  for _, file in ipairs(vim.fn.glob(dir() .. "/*.json", false, true)) do
+    vim.fn.delete(file)
+    removed = removed + 1
+  end
+  return removed
+end
+
+return M
