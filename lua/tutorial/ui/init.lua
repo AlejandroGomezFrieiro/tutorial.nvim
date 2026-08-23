@@ -7,6 +7,8 @@
 
 local M = {}
 
+local config = require("tutorial.config")
+
 local PREFIX = "tutorial://"
 local NS = vim.api.nvim_create_namespace("tutorial")
 
@@ -14,6 +16,12 @@ local NS = vim.api.nvim_create_namespace("tutorial")
 -- "menu", "done"). Reusing a valid window is what keeps step advances from
 -- stacking splits or swapping whatever buffer the user was in.
 local wins = {}
+
+-- Progress glyph by role ("done", "pending", "check"), honoring the ascii
+-- preset and user overrides from setup().
+function M.glyph(name)
+  return config.get().glyphs[name] or ""
+end
 
 function M.hl(name, link)
   vim.api.nvim_set_hl(0, name, vim.tbl_extend("force", { default = true }, link))
@@ -26,10 +34,38 @@ function M.setup_highlights()
   M.hl("TutorialDone", { link = "String" })
   M.hl("TutorialAccent", { link = "Special" })
   M.hl("TutorialCardMeta", { link = "Comment", italic = true })
+  -- User overrides land after the defaults so they win — and without the
+  -- `default` flag, which would make Neovim keep the earlier definition.
+  for name, spec in pairs(config.get().highlights or {}) do
+    if type(name) == "string" and type(spec) == "table" then
+      vim.api.nvim_set_hl(0, name, spec)
+    end
+  end
 end
 
 function M.footer(text)
   return { text = "  " .. text, hl = "TutorialMuted" }
+end
+
+-- The completion summary shared by the panel's finish view and the standalone
+-- done screen (one source of truth; only the footer differs).
+function M.done_lines(def, footer_text)
+  return {
+    { text = "" },
+    { text = "  " .. M.glyph("check") .. "  TUTORIAL COMPLETE", hl = "TutorialDone" },
+    { text = "" },
+    {
+      segments = {
+        { text = "  " },
+        { text = def.title, hl = "TutorialKey" },
+        { text = " — all steps done." },
+      },
+    },
+    { text = "" },
+    { text = "  Progress stays saved; reset from the menu to replay.", hl = "TutorialMuted" },
+    { text = "" },
+    M.footer(footer_text or "[q] dismiss"),
+  }
 end
 
 -- (Re)fill a buffer with entries, replacing any prior content. Clears stale

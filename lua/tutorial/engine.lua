@@ -4,11 +4,15 @@
 -- autocmds; everything flows through here.
 --
 -- Hub events and what they feed:
---   User *       → on_event edge specs
---   CmdlineLeave → on_command edge specs (via getcmdline())
---   BufEnter     → on_buffer edge specs + state poll
---   BufWritePost → state poll
---   CursorHold   → state poll
+--   User *        → on_event edge specs (glob patterns allowed)
+--   CmdlineEnter  → snapshots v:errmsg so command specs can demand success
+--   CmdlineLeave  → on_command edge specs (via getcmdline()) + mistake checks
+--   BufEnter      → on_buffer edge specs + state poll
+--   BufWritePost  → state poll
+--   CursorHold    → state poll
+--   optional timer→ state poll every config.poll_ms while active
+--   typed keys    → on_key edge specs + mistake checks (single engine-owned
+--                   vim.on_key listener; never a per-tutorial one)
 --
 -- Presentation: layout "card" renders full-window cards (reused window);
 -- anything else — the default — pins the walkthrough panel beside the
@@ -23,17 +27,21 @@
 local registry = require("tutorial.registry")
 local state = require("tutorial.state")
 local checks = require("tutorial.checks")
+local config = require("tutorial.config")
 
 local M = {}
 
 local session -- { def, steps, index, ctx, answers, cwd, prev_win, entered,
--- asked } or nil
+-- asked, hints, revealed, keys, stats, mistake, last_id, cmd_err0 } or nil
 local advancing -- guards against re-entrant evaluation while a completion is
 -- being processed (rendering the next card fires BufEnter, which would
 -- otherwise evaluate again and delete the buffer mid-render)
 -- Mutually recursive trio: present schedules input capture, capture nudges
 -- evaluation, evaluation advances and presents again.
 local present, ask_current, evaluate
+
+local poll_timer -- uv timer backing config.poll_ms, when enabled
+local key_ns = vim.api.nvim_create_namespace("tutorial_keys")
 
 local function step()
   if not session then
@@ -48,6 +56,29 @@ end
 
 local function panel_mode()
   return session ~= nil and session.def.layout ~= "card"
+end
+
+local function rerender()
+  if not session then
+    return
+  end
+  if panel_mode() then
+    require("tutorial.ui.panel").update(session)
+  else
+    require("tutorial.ui.step").open(session)
+  end
+end
+
+-- Title of the section containing step_id, or nil. Sections group long tours
+-- into chunks; membership is declared once on the definition.
+function M.section_of(def, step_id)
+  for _, section in ipairs(def.sections or {}) do
+    for _, sid in ipairs(section.steps or {}) do
+      if sid == step_id then
+        return section.title
+      end
+    end
+  end
 end
 
 -- Seed persisted answer values into ctx under their input stores. Idempotent;
@@ -118,6 +149,15 @@ function present()
   if not current then
     return
   end
+  -- A fresh step forgets the previous step's corrective note.
+  if session.last_id ~= current.id then
+    session.mistake = nil
+    session.last_id = current.id
+  end
+  -- Analytics clock starts on first presentation.
+  if session.stats[current.id] == nil then
+    session.stats[current.id] = { t0 = os.time(), hints = 0 }
+  end
   if type(current.enter) == "function" and not session.entered[current.id] then
     session.entered[current.id] = true
     local ok, err = pcall(current.enter, session.ctx)
@@ -125,11 +165,7 @@ function present()
       notify(("step enter failed: %s"):format(err), vim.log.levels.ERROR)
     end
   end
-  if panel_mode() then
-    require("tutorial.ui.panel").update(session)
-  else
-    require("tutorial.ui.step").open(session)
-  end
+  rerender()
   -- Capture-once for input steps: the engine owns the guard (never a polled
   -- predicate), and the prompt fires off the render tick.
   if current.input and not session.asked[current.id] then
@@ -169,6 +205,114 @@ end
 
 M.answer = ask_current
 
+-- Hint ladder: each press advances through the hint list, wrapping to hidden.
+-- Fading support on demand instead of dumping every hint at once. Returns the
+-- level now shown (1-based) or 0 when fully hidden again.
+function M.cycle_hint()
+  if not session then
+    return nil
+  end
+  local current = step()
+  if not current then
+    return nil
+  end
+  local total = type(current.hint) == "table" and #current.hint or (current.hint and 1 or 0)
+  if total == 0 then
+    return 0
+  end
+  local level = (session.hints[current.id] or 0) + 1
+  if level > total then
+    level = 0
+  end
+  session.hints[current.id] = level
+  -- Revealing a recall-masked step is what the same key is for.
+  if level > 0 then
+    session.revealed[current.id] = true
+  end
+  if config.get().analytics then
+    session.stats[current.id].hints = session.stats[current.id].hints + 1
+  end
+  return level
+end
+
+-- Whether the current step's key hints may render unmasked yet. Recall steps
+-- mask {key:…} tokens until the learner attempts/reveals — retrieval before
+-- the answer, the point of the exercise.
+function M.revealed(step_id)
+  return session == nil or session.revealed[step_id or (step() or {}).id] ~= nil
+end
+
+-- Show a gentle corrective note without advancing. Matched against the
+-- leading command word (commands) or the recent keystroke tail (keys).
+local function flag_mistake(message)
+  if not session then
+    return
+  end
+  session.mistake = message or "Not quite — check the step again."
+  if config.get().analytics then
+    local stat = session.stats[step().id]
+    stat.mistakes = (stat.mistakes or 0) + 1
+  end
+  rerender()
+end
+
+local function mistake_entries(current)
+  if not current or not current.mistake then
+    return {}
+  end
+  return current.mistake[1] and current.mistake or { current.mistake }
+end
+
+-- The Ex command line just executed; check mistakes first (a wrong command is
+-- the teaching moment), then completion specs.
+M._dispatch_command = function(line, errmsg_changed)
+  if not session or advancing then
+    return
+  end
+  local word = checks.leading_word(line)
+  for _, entry in ipairs(mistake_entries(step())) do
+    if entry.match == word then
+      flag_mistake(entry.message)
+      return
+    end
+  end
+  evaluate({ command = line, errmsg_changed = errmsg_changed })
+end
+
+-- Feed raw keystrokes from the engine-owned listener. Keys accumulate in a
+-- bounded buffer for the whole session so late-appearing on_key specs still
+-- see history.
+M._feed_key = function(chunk)
+  if not session or advancing then
+    return
+  end
+  -- The command line (prompts, ":" commands) has its own paths.
+  if vim.fn.mode() == "c" then
+    return
+  end
+  local keys = session.keys
+  keys[#keys + 1] = chunk
+  if #keys > 32 then
+    table.remove(keys, 1)
+  end
+  local current = step()
+  local key_specs = checks.has_kind(current, "key")
+  for _, entry in ipairs(mistake_entries(current)) do
+    if type(entry.match) == "string" and #entry.match > 0 then
+      local ok, seq = pcall(vim.api.nvim_replace_termcodes, entry.match, true, true, true)
+      local tail = table.concat(keys)
+      -- Match the literal notation or its termcode form (see checks.key_hit).
+      if tail:sub(-#entry.match) == entry.match or (ok and #seq > 0 and tail:sub(-#seq) == seq) then
+        flag_mistake(entry.message)
+        return
+      end
+    end
+  end
+  if key_specs then
+    evaluate({ keys = keys })
+  end
+end
+
 local function finish_step(step_id)
   local finished
   for _, s in ipairs(session.steps) do
@@ -184,6 +328,19 @@ local function finish_step(step_id)
       notify(("step complete failed: %s"):format(err), vim.log.levels.ERROR)
     end
   end
+  -- Persist opt-in telemetry alongside the completion timestamp.
+  if config.get().analytics then
+    local stat = session.stats[step_id]
+    if stat then
+      stat.completed_at = os.time()
+      stat.secs = os.time() - (stat.t0 or os.time())
+      state.set_stats(session.def.id, step_id, {
+        secs = stat.secs,
+        hints = stat.hints,
+        mistakes = stat.mistakes or 0,
+      })
+    end
+  end
   local done_count = select(1, state.progress(session.def, session.steps))
   notify(("✓ %s (%d/%d)"):format((finished or step()).title, done_count, #session.steps))
   if done_count >= #session.steps then
@@ -193,7 +350,7 @@ local function finish_step(step_id)
       pcall(def.teardown, session.ctx)
     end
     session = nil
-    vim.api.nvim_del_augroup_by_name("tutorial_hub")
+    M._stop_hubs()
     if def.layout == "card" then
       require("tutorial.ui.done").open(def)
     else
@@ -258,13 +415,31 @@ function M.active()
   return session
 end
 
--- The Ex command line just executed; feed command specs.
-M._dispatch_command = function(line)
-  evaluate({ command = line })
-end
-
 -- Test/driver hook: evaluate the active step against an explicit trigger.
 M._evaluate = evaluate
+
+local function start_poll_timer()
+  local interval = config.get().poll_ms or 0
+  if interval <= 0 or poll_timer then
+    return
+  end
+  poll_timer = vim.loop.new_timer()
+  poll_timer:start(
+    interval,
+    interval,
+    vim.schedule_wrap(function()
+      evaluate({})
+    end)
+  )
+end
+
+local function ensure_key_listener()
+  if vim.on_key then
+    vim.on_key(function(chunk)
+      M._feed_key(chunk)
+    end, key_ns)
+  end
+end
 
 local function ensure_hub()
   if vim.fn.exists("#tutorial_hub") == 1 then
@@ -282,13 +457,22 @@ local function ensure_hub()
       end)
     end,
   })
+  vim.api.nvim_create_autocmd("CmdlineEnter", {
+    group = group,
+    callback = function()
+      if session then
+        session.cmd_err0 = vim.v.errmsg
+      end
+    end,
+  })
   vim.api.nvim_create_autocmd("CmdlineLeave", {
     group = group,
     callback = function()
       local line = vim.fn.getcmdline()
+      local changed = session ~= nil and vim.v.errmsg ~= session.cmd_err0
       if line ~= "" then
         vim.schedule(function()
-          M._dispatch_command(line)
+          M._dispatch_command(line, changed)
         end)
       end
     end,
@@ -309,6 +493,26 @@ local function ensure_hub()
       end)
     end,
   })
+  ensure_key_listener()
+  start_poll_timer()
+end
+
+-- Tear down every observer the hub installed (autocmds, key listener, poll
+-- timer). Idempotent; called by quit and by natural completion.
+function M._stop_hubs()
+  if vim.fn.exists("#tutorial_hub") == 1 then
+    vim.api.nvim_del_augroup_by_name("tutorial_hub")
+  end
+  if vim.on_key then
+    pcall(vim.on_key, nil, key_ns)
+  end
+  if poll_timer then
+    pcall(function()
+      poll_timer:stop()
+      poll_timer:close()
+    end)
+    poll_timer = nil
+  end
 end
 
 -- Start (or resume) a tutorial by definition. Any active session is replaced.
@@ -330,6 +534,10 @@ function M.start(def)
     prev_win = vim.api.nvim_get_current_win(),
     entered = {}, -- steps whose enter hook already ran this session
     asked = {}, -- input steps already prompted this session
+    hints = {}, -- hint-ladder level currently shown, per step
+    revealed = {}, -- recall steps whose keys have been uncovered
+    keys = {}, -- bounded recent-keystroke buffer
+    stats = {}, -- per-step analytics accumulators
   }
   if def.setup then
     local ok, err = pcall(def.setup, session.ctx)
@@ -387,9 +595,7 @@ function M.quit(silent)
   if not session then
     return
   end
-  if vim.fn.exists("#tutorial_hub") == 1 then
-    vim.api.nvim_del_augroup_by_name("tutorial_hub")
-  end
+  M._stop_hubs()
   if session.def.teardown then
     pcall(session.def.teardown, session.ctx)
   end
@@ -416,6 +622,39 @@ function M.goto_step(delta)
   end
   session.index = target
   present()
+end
+
+-- Jump straight to the nth visible step (clamped). Backs :Tutorial goto N.
+function M.goto_index(n)
+  if not session or type(n) ~= "number" then
+    return
+  end
+  n = math.max(1, math.min(n, #session.steps))
+  session.index = n
+  present()
+end
+
+-- Bring the tutorial surface forward deliberately (:Tutorial focus).
+function M.focus()
+  if not session then
+    return false
+  end
+  if panel_mode() then
+    return require("tutorial.ui.panel").focus()
+  end
+  local win = require("tutorial.ui").win_for("card")
+  if win then
+    vim.api.nvim_set_current_win(win)
+    return true
+  end
+  -- Card closed: reopen it where the user stands.
+  require("tutorial.ui.step").open(session)
+  return true
+end
+
+-- Test hook: the uv timer backing config.poll_ms (nil when not polling).
+function M._poll_timer()
+  return poll_timer
 end
 
 return M

@@ -16,39 +16,10 @@ local function cfg()
   return config.get()
 end
 
-function M.bar(session)
-  local def = session.def
-  local steps = session.steps
-  local glyphs = {}
-  for _, step in ipairs(steps) do
-    glyphs[#glyphs + 1] = state.is_done(def.id, step.id) and "✦" or "✧"
-  end
-  return {
-    segments = {
-      { text = "  " .. table.concat(glyphs, "") .. " ", hl = "TutorialAccent" },
-      { text = ("%d/%d"):format(state.progress(def, steps), #steps), hl = "TutorialKey" },
-    },
-  }
-end
-
 -- Completion summary shown inside the panel when the tutorial finishes.
+-- Content is shared with the standalone done screen (ui.done_lines).
 function M.done_lines(def)
-  return {
-    { text = "" },
-    { text = "  ✓  TUTORIAL COMPLETE", hl = "TutorialDone" },
-    { text = "" },
-    {
-      segments = {
-        { text = "  " },
-        { text = def.title, hl = "TutorialKey" },
-        { text = " — all steps done." },
-      },
-    },
-    { text = "" },
-    { text = "  Progress stays saved; reset from the menu to replay.", hl = "TutorialMuted" },
-    { text = "" },
-    ui.footer("[q] dismiss"),
-  }
+  return ui.done_lines(def)
 end
 
 local function entries()
@@ -76,7 +47,7 @@ local function attach_keys(buf)
       end
     end,
     h = function()
-      -- step.lua owns show_hint for its own rendering path.
+      -- step.lua owns hint-ladder state; the panel just re-renders.
       local step = require("tutorial.ui.step")
       step.toggle_hint()
       rerender()

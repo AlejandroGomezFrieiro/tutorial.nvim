@@ -26,16 +26,45 @@ COMMANDS                                                        *tutorial-comman
     Forget sticky progress. With an id, reset that tutorial only; without,
     reset every tutorial.
 
+:Tutorial focus                                              *:Tutorial-focus*
+    Bring the running tutorial's surface forward deliberately (the pinned
+    panel or the card) without touching anything else.
+
+:Tutorial next / :Tutorial prev                        *:Tutorial-next*
+    View the next / previous step without completing anything.
+
+:Tutorial goto N                                             *:Tutorial-goto*
+    View step N of the active tour directly.
+
+:Tutorial status                                            *:Tutorial-status*
+    Print the one-line status also served by |tutorial-status()|.
+
+:Tutorial new <id>                                            *:Tutorial-new*
+    Write a commented scaffold to <id>.tutorial.lua in the current directory.
+    Register it with |load_file()| once it is yours.
+
+:Tutorial load <path>                                        *:Tutorial-load*
+    Register a definition from a `.lua` file (full power) or a
+    `.tutorial.json` file (declarative-only portable data).
+
+:Tutorial stats [id]                                         *:Tutorial-stats*
+    Per-step time/hint/mistakes telemetry; needs `analytics` enabled.
+
 Step card keys:                                        *tutorial-step-keys*
     n  view next step            p  view previous step
-    h  toggle the hint           a  answer the step's question
+    h  next hint rung / reveal   a  answer the step's question
     r  re-answer (overwrite)     d  mark this step done
     s  hide/show the pinned panel
     q  pause (progress saved)
 
+Steps with a hint ladder reveal one rung per press of `h`; recall steps keep
+their key tokens masked until revealed — try first, then look.
+
 While a tutorial runs it is pinned in a split beside your work; completing
 a step updates the panel without moving your focus. Re-running :Tutorial
 hides or restores the panel. Statuslines can read |tutorial-status()|.
+The menu supports `/` substring filtering (id, title, tags), mouse clicks,
+and shows finished tours with how long ago they completed.
 
 ==============================================================================
 AUTHORING                                                     *tutorial-authoring*
@@ -46,7 +75,11 @@ Plugins register definitions at load time: >
       id = "my-plugin-basics",
       title = "Getting started",
       summary = "Optional one-liner for menus",
+      tags = { "getting-started" },     -- shown and filterable in menus
       layout = "card",                 -- or "split"
+      sections = {                     -- optional chunk headers for long tours
+        { title = "Basics", steps = { "step-one" } },
+      },
       setup = function(ctx) end,       -- optional workspace prep
       teardown = function(ctx) end,    -- optional cleanup
       steps = {
@@ -54,7 +87,11 @@ Plugins register definitions at load time: >
           id = "step-one",
           title = "Do the thing",
           body = { "Press {key:<leader>x}." },
-          hint = "Shown when the user presses h",
+          hint = { "One nudge", "then another" },  -- ladder or single string
+          recall = true,               -- mask {key:…} until attempted/revealed
+          mistake = {                  -- gentle corrections, never advancing
+            { match = "<F9>", message = "That key does nothing here." },
+          },
           cond = function(ctx) return true end,  -- false skips the step
           enter = function(ctx) end,             -- once on first present
           complete = function(ctx) end,          -- when checked off
@@ -78,40 +115,74 @@ Completion specs ~                                            *tutorial-events*
 Any spec matching completes the step; manual `d` always works. The long-form
 authoring guide lives in `docs/authoring.md` in the repository.
 
-    on_command:Name [args…]   An Ex command line whose leading word is Name.
-    on_event:Pattern          A |User| autocmd fired with this pattern.
+    on_command:Name [args…]   An Ex command line whose leading phrase is Name.
+    on_command:Name!          …and the command ran without raising v:errmsg.
+    on_event:Pattern          A |User| autocmd fired matching this pattern;
+                              `*` and `?` act as globs ("MyPlugin*").
+    on_key:<lhs>              The user typed this key sequence (<leader> and
+                              friends resolve against real mappings).
     on_buffer:pattern         A buffer opened whose path matches the Lua pattern.
+    on_buf_contains:pat       The current buffer contains Lua pattern pat.
+    on_diagnostic:[severity]  No diagnostics of severity (error|warn|info|
+                              hint, default error) remain in the buffer.
     on_file_exists:glob       The glob expands to at least one path.
-    on_file_contains:p:pat    The readable file p contains Lua pattern pat.
+    on_file_contains:p:pat    Some path:pattern split along the colons finds
+                              a readable file containing pat (paths may
+                              themselves contain colons).
     { context = fn }          A predicate, called with the session ctx.
 
 Body text ~                                              *tutorial-body*
 Body lines are strings. `{key:X}` tokens render as key hints; tokens
 containing spaces are treated as prose descriptions instead of mappings.
-`{ctx:field}` and `{answer:step_id}` interpolate the user's answers into
-title, body, and hint (and into path/glob/pattern spec args); unknown fields
-stay verbatim. require("tutorial").slug() makes answer values path-safe.
+Steps with `recall = true` render every token masked (`[hidden]`) until the
+user presses `h` — retrieval before revelation. `{ctx:field}` and
+`{answer:step_id}` interpolate the user's answers into title, body, and hint
+(and into path/glob/pattern spec args); unknown fields stay verbatim.
+require("tutorial").slug() makes answer values path-safe.
 
 Input steps ~                                            *tutorial-input*
 A step with an `input` table asks its user at the command line — focus never
 moves. The prompt fires once per session; `transform` then `validate` run on
 confirm (invalid re-prompts, <Esc> cancels), and a valid answer is stored
-into ctx under `store` and persisted. `d` always completes regardless;
-`a` answers on demand, `r` re-answers.
+into ctx under `store` and persisted. Data-only definitions (JSON) can use
+`pattern` (a Lua pattern the answer must match) plus an optional `message`
+instead of function validators. `d` always completes regardless; `a` answers
+on demand, `r` re-answers.
+
+Portable definitions ~                                  *tutorial-json*
+Files ending in `.tutorial.json` carry definitions as pure data — same field
+names as the Lua schema, minus everything executable (no functions; input
+validation via `pattern`). Load them with require("tutorial").load_file(path)
+or :Tutorial load. require("tutorial").from_json(text) decodes strings;
+require("tutorial").validate(def) lints any definition into
+(errors, warnings) before you register it.
 
 Progress storage ~                                  *tutorial-persistence*
-Sticky JSON under `stdpath("data")/tutorial/<id>.json` holding `done`
-(write-once), `answers` (input captures), and `vars` (free-form). Only
-|:Tutorial-reset| clears them. Resume seeds ctx from answers/vars before
-setup and lands on the first incomplete step of the resolved step list.
+Sticky JSON under `stdpath("data")/tutorial/<id>.json` holding `version`,
+`done` (write-once), `answers` (input captures), `vars` (free-form), and —
+when analytics are on — `stats`. Only |:Tutorial-reset| clears them. Resume
+seeds ctx from answers/vars before setup and lands on the first incomplete
+step of the resolved step list.
 
 setup({opts})                                                *tutorial-setup*
-    Defines :Tutorial. `opts.data_dir` overrides the progress directory.
-    `opts.panel_position` ("left"/"right") and `opts.panel_width` (default
-    42) configure the pinned panel.
+    Defines :Tutorial. Options:
+    `data_dir`        progress directory override (tests, sandboxes)
+    `panel_position`  "left" (default) or "right"
+    `panel_width`     panel columns, default 42
+    `poll_ms`         >0 polls state checks on a timer while active
+    `analytics`       persist per-step timing/hints for :Tutorial stats
+    `ascii`           ASCII progress glyphs ("*", "-", "x")
+    `glyphs`          explicit glyph table {done,pending,check}
+    `highlights`      highlight overrides, e.g. { TutorialTitle={fg="#f00"} }
+    Unknown options warn instead of being silently dropped.
 
-status()                                              *tutorial-status()*
-    "Title n/m" while a tutorial runs, nil otherwise. Intended for
+status([fmt])                                       *tutorial-status()*
+    "Title n/m" while a tutorial runs, nil otherwise. `fmt="percent"` gives
+    "Title 33%"; `fmt="step"` appends the current step's title. Intended for
     statuslines.
+
+var(name[, value])                                      *tutorial-var()*
+    Read or write a free-form tour variable on the active session. Writes
+    persist and land in ctx immediately, so predicates see them at once.
 
 vim:tw=78:ts=8:ft=help:norl:

@@ -1028,5 +1028,589 @@ end
 vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))
 vim.fn.delete(e2e_dir, "rf")
 
+-- --- Setup validation ---------------------------------------------------------
+
+registry._clear()
+local notified = {}
+local real_notify = vim.notify
+vim.notify = function(msg, level)
+  notified[#notified + 1] = { msg = tostring(msg), level = level }
+end
+
+local config = tutorial._config
+config._reset()
+config.setup({ bogus_option = 1, panel_position = "up", poll_ms = -1 })
+assert_true(#vim.tbl_filter(function(n)
+  return n.msg:find("unknown setup option", 1, true) ~= nil
+end, notified) == 1, "unknown setup option warns")
+assert_true(#vim.tbl_filter(function(n)
+  return n.msg:find("panel_position must be", 1, true) ~= nil
+end, notified) == 1, "bad panel_position warns")
+assert_true(#vim.tbl_filter(function(n)
+  return n.msg:find("poll_ms", 1, true) ~= nil
+end, notified) == 1, "negative poll_ms warns")
+
+-- The ascii glyph preset swaps symbols and hands them back.
+config._reset()
+config.setup({ ascii = true })
+assert_true(config.get().glyphs.done == "*", "ascii preset swaps done glyph")
+assert_true(config.get().glyphs.pending == "-", "ascii preset swaps pending glyph")
+config.setup({ ascii = false })
+assert_true(config.get().glyphs.done == "✦", "ascii off restores unicode glyphs")
+-- Explicit glyphs always win over the preset.
+config._reset()
+config.setup({ ascii = true, glyphs = { done = "D", pending = "p", check = "c" } })
+assert_true(config.get().glyphs.done == "D", "explicit glyphs beat the ascii preset")
+
+-- Highlight overrides land after defaults (fg-based: easy to read back).
+local hl = require("tutorial.ui")
+config._reset()
+config.setup({ highlights = { TutorialTitle = { fg = "#ff0000" } } })
+hl.setup_highlights()
+local info = vim.api.nvim_get_hl(0, { name = "TutorialTitle" })
+assert_true(info.fg == 0xff0000, "highlight override wins")
+
+vim.notify = real_notify
+config._reset()
+tutorial.setup()
+
+-- --- Public vars writer -------------------------------------------------------
+
+registry._clear()
+vim.cmd("silent! only!")
+state._set_dir(vim.fn.tempname() .. "/progress12")
+registry.register({
+  id = "varsy",
+  title = "Varsy",
+  layout = "card",
+  steps = {
+    {
+      id = "v1",
+      title = "V1",
+      body = { "Theme: {ctx:theme}" },
+      completion = {
+        {
+          context = function(ctx)
+            return ctx.theme ~= nil
+          end,
+        },
+      },
+    },
+  },
+})
+session = engine.start_id("varsy")
+assert_true(tutorial.var("theme", "loss") == "loss", "var setter returns the value")
+assert_true(session.ctx.theme == "loss", "var lands in ctx immediately")
+assert_true(state.get_var("varsy", "theme") == "loss", "var persists to disk")
+assert_true(tutorial.var("theme") == "loss", "var getter reads back")
+engine.quit(true)
+session = engine.start_id("varsy")
+assert_true(session.ctx.theme == "loss", "persisted var seeds ctx on resume")
+engine._evaluate({})
+assert_true(state.is_done("varsy", "v1"), "seeded var satisfied the predicate")
+engine.quit(true)
+vim.notify = function(msg, level)
+  notified[#notified + 1] = { msg = tostring(msg), level = level }
+end
+tutorial.var("orphan", 1)
+assert_true(#vim.tbl_filter(function(n)
+  return n.msg:find("without an active tutorial", 1, true) ~= nil
+end, notified) > 0, "setting a var with no session warns")
+vim.notify = real_notify
+
+-- --- validate(): linting without registering ----------------------------------
+
+local V = tutorial._validate
+local errors, warnings = V.definition({
+  id = "clean",
+  title = "Clean",
+  steps = { { id = "a", title = "A", body = "b" } },
+})
+assert_true(#errors == 0 and #warnings == 0, "minimal definition lints clean")
+
+_, warnings = V.definition({
+  id = "linty",
+  title = "Linty",
+  mystery_field = true,
+  steps = {
+    {
+      id = "a",
+      title = "A",
+      body = { "see {answer:ghost}", "{ctx:anything} is fine" },
+      completion = { "on_nonsense:x" },
+      mistake = { message = "no match" },
+    },
+    { id = "b", title = "B", body = "b" },
+  },
+  sections = { { title = "S", steps = { "missing" } } },
+})
+local function warned(fragment)
+  for _, w in ipairs(warnings) do
+    if w:find(fragment, 1, true) then
+      return true
+    end
+  end
+  return false
+end
+assert_true(warned("unknown field"), "unknown def field warned")
+assert_true(warned("unknown completion spec"), "malformed spec warned")
+assert_true(warned("{answer:ghost}"), "dangling answer token warned")
+assert_true(warned("needs a string `match`"), "mistake without match warned")
+assert_true(warned("lists unknown step"), "section referencing missing step warned")
+
+errors = V.definition({ title = "no id" })
+assert_true(
+  #errors == 1 and errors[1]:find("requires an id", 1, true),
+  "validate surfaces hard errors"
+)
+
+ok, err = pcall(V.assert_pure, { ok = { nested = function() end } }, "def")
+assert_true(not ok and err:find("declarative%-only", 1, false), "assert_pure rejects functions")
+V.assert_pure({ deep = { data = { 1, "two", false } } }, "def")
+assert_true(true, "assert_pure accepts pure data")
+
+-- --- New completion checks ----------------------------------------------------
+
+parsed = checks.parse("on_command:Go!")
+assert_true(parsed.arg == "Go" and parsed.strict == true, "strict command parses bang off")
+assert_true(not checks.evaluate(parsed, { command = "Go now" }), "strict needs errmsg evidence")
+assert_true(
+  checks.evaluate(parsed, { command = "Go now", errmsg_changed = false }),
+  "strict completes when errmsg unchanged"
+)
+assert_true(
+  not checks.evaluate(parsed, { command = "Go now", errmsg_changed = true }),
+  "strict refuses when errmsg moved"
+)
+parsed = checks.parse("on_command:Go")
+assert_true(
+  checks.evaluate(parsed, { command = "Go", errmsg_changed = true }),
+  "non-strict ignores errmsg"
+)
+
+parsed = checks.parse("on_event:MyPlugin*")
+assert_true(checks.evaluate(parsed, { event = "MyPluginSaved" }), "event glob star matches")
+assert_true(not checks.evaluate(parsed, { event = "OtherPluginSaved" }), "event glob anchored")
+parsed = checks.parse("on_event:Save?")
+assert_true(checks.evaluate(parsed, { event = "Save1" }), "event glob question mark")
+assert_true(not checks.evaluate(parsed, { event = "Save12" }), "question mark matches one char")
+
+local kbuf = vim.api.nvim_create_buf(false, true)
+vim.api.nvim_buf_set_lines(kbuf, 0, -1, false, { "the answer is forty-two" })
+parsed = checks.parse("on_buf_contains:forty%-two")
+assert_true(checks.evaluate(parsed, { buf = kbuf }), "buf_contains finds pattern")
+assert_true(not checks.evaluate(parsed, { buf = obuf }), "buf_contains misses other buffers")
+parsed = checks.parse("on_buf_contains:{ctx:word}")
+assert_true(
+  checks.evaluate(parsed, { buf = kbuf, ctx = { word = "answer is" } }),
+  "buf_contains interpolates tokens"
+)
+
+local dbuf = vim.api.nvim_create_buf(false, true)
+vim.api.nvim_buf_set_name(dbuf, "/virtual/diag.md")
+local dns = vim.api.nvim_create_namespace("tutorial_spec_diag")
+local function set_diags(list)
+  vim.diagnostic.set(dns, dbuf, list, {})
+end
+parsed = checks.parse("on_diagnostic:error")
+set_diags({})
+assert_true(checks.evaluate(parsed, { buf = dbuf }), "diagnostic clear on empty")
+set_diags({ { lnum = 0, col = 0, severity = vim.diagnostic.severity.ERROR } })
+assert_true(not checks.evaluate(parsed, { buf = dbuf }), "error diagnostic blocks")
+parsed = checks.parse("on_diagnostic:warn")
+set_diags({ { lnum = 0, col = 0, severity = vim.diagnostic.severity.HINT } })
+assert_true(
+  checks.evaluate(parsed, { buf = dbuf }),
+  "warn-level tolerates hints (nothing warn-or-worse)"
+)
+set_diags({})
+ok, err = pcall(checks.parse, "on_diagnostic:loud")
+assert_true(not ok and err:find("unknown diagnostic severity", 1, true), "bad severity rejected")
+
+-- A path with a colon: successive splits rescue the spec.
+vim.fn.writefile({ "marker inside" }, tmp .. "/a:b.md")
+parsed = checks.parse("on_file_contains:" .. tmp .. "/a:b.md:marker")
+assert_true(checks.evaluate(parsed), "colon-bearing path found via retry splits")
+
+parsed = checks.parse("on_key:g")
+assert_true(checks.evaluate(parsed, { keys = { "g" } }), "key spec matches direct hit")
+parsed = checks.parse("on_key:<leader>x")
+assert_true(
+  checks.evaluate(parsed, { keys = { "<lead", "er>", "x" } }),
+  "key spec matches across chunks (literal notation)"
+)
+assert_true(
+  checks.evaluate(parsed, { keys = { "x" } }) == false,
+  "key spec wants the whole sequence"
+)
+ok, err = pcall(vim.api.nvim_replace_termcodes, "<leader>x", true, true, true)
+assert_true(ok, "termcode normalization available headlessly")
+
+-- --- Engine: hint ladder, recall, mistakes, sections --------------------------
+
+registry._clear()
+vim.cmd("silent! only!")
+state._set_dir(vim.fn.tempname() .. "/progress13")
+registry.register({
+  id = "pedagogy",
+  title = "Pedagogy",
+  layout = "card",
+  sections = { { title = "Basics", steps = { "p1" } } },
+  steps = {
+    {
+      id = "p1",
+      title = "Ladder",
+      body = { "Press {key:<F3>} someday." },
+      hint = { "Rung one.", "Rung two." },
+      recall = true,
+      mistake = { match = "<F9>", message = "That key does nothing here." },
+      completion = { "on_key:<F3>" },
+    },
+    {
+      id = "p2",
+      title = "Mistake commands",
+      body = { "Run :echo lowercase" },
+      mistake = { { match = "Echo", message = "Ex commands are lowercase." } },
+      completion = { "on_command:echo" },
+    },
+    { id = "p3", title = "Plain", body = { "done by hand" }, hint = "single hint" },
+  },
+})
+
+session = engine.start_id("pedagogy")
+local step_ui = require("tutorial.ui.step")
+lines = card_text()
+assert_true(lines:find("%[hidden%]", 1, false) ~= nil, "recall masks key tokens")
+assert_true(lines:find("<F3>", 1, false) == nil, "masked token stays hidden")
+assert_true(lines:find("%[Basics%]", 1, false) ~= nil, "section header renders")
+assert_true(step_ui.toggle_hint() == 1, "first h reveals ladder rung one")
+step_ui.open(session)
+lines = card_text()
+assert_true(lines:find("Rung one%.", 1, false) ~= nil, "rung one renders")
+assert_true(lines:find("<F3>", 1, false) ~= nil, "revealing unmasks tokens")
+assert_true(lines:find("Hint %(1/2%)", 1, false) ~= nil, "footer shows ladder position")
+assert_true(step_ui.toggle_hint() == 2, "second h climbs to rung two")
+step_ui.open(session)
+assert_true(lines ~= nil and card_text():find("Rung two%.", 1, false) ~= nil, "rung two renders")
+assert_true(step_ui.toggle_hint() == 0, "third h wraps to hidden")
+step_ui.open(session)
+assert_true(card_text():find("Rung one%.", 1, false) == nil, "hidden ladder renders nothing")
+
+-- Key-driven completion and key-driven mistake detection share the feed.
+engine._feed_key("<F9>")
+lines = card_text()
+assert_true(
+  lines:find("That key does nothing here%.", 1, false) ~= nil,
+  "wrong key surfaces the gentle note"
+)
+assert_true(not state.is_done("pedagogy", "p1"), "mistake never advances")
+engine._feed_key("<F3>")
+assert_true(state.is_done("pedagogy", "p1"), "right key completes the step")
+lines = card_text()
+assert_true(
+  lines:find("Ex commands are lowercase%.", 1, false) == nil,
+  "mistake note clears on advance"
+)
+
+engine._dispatch_command("Echo hi", false)
+lines = card_text()
+assert_true(
+  lines:find("Ex commands are lowercase%.", 1, false) ~= nil,
+  "wrong command casing teaches instead of advancing"
+)
+assert_true(not state.is_done("pedagogy", "p2"), "mistake command does not complete")
+engine._dispatch_command("echo hi", false)
+assert_true(state.is_done("pedagogy", "p2"), "correct command completes")
+
+engine.goto_index(3)
+assert_true(session.index == 3, "goto_index jumps absolutely")
+lines = card_text()
+assert_true(lines:find("%[Basics%]", 1, false) == nil, "section header absent outside sections")
+assert_true(step_ui.toggle_hint() == 1, "string hint forms a one-rung ladder")
+engine.quit(true)
+
+-- --- Analytics ----------------------------------------------------------------
+
+registry._clear()
+state._set_dir(vim.fn.tempname() .. "/progress14")
+config._reset()
+config.setup({ data_dir = vim.fn.tempname() .. "/progress14", analytics = true })
+local ana_flag = false
+registry.register({
+  id = "telemetry",
+  title = "Telemetry",
+  layout = "card",
+  steps = {
+    {
+      id = "t1",
+      title = "T1",
+      body = { "b" },
+      hint = "nudge",
+      completion = {
+        {
+          context = function()
+            return ana_flag
+          end,
+        },
+      },
+    },
+    { id = "t2", title = "T2", body = { "manual" } },
+  },
+})
+session = engine.start_id("telemetry")
+require("tutorial.ui.step").toggle_hint()
+ana_flag = true
+engine._evaluate({})
+assert_true(state.is_done("telemetry", "t1"), "analytics tour advances")
+local stat = state.stats("telemetry").t1
+assert_true(stat ~= nil and type(stat.secs) == "number", "completion records elapsed seconds")
+assert_true(stat.hints == 1, "hint presses counted")
+registry.register({
+  id = "telemetry",
+  title = "Telemetry",
+  layout = "card",
+  steps = {
+    { id = "t1", title = "T1", body = { "b" } },
+    { id = "t2", title = "T2", body = { "manual" } },
+  },
+})
+engine.done() -- second step, no telemetry-worthy events needed
+notified = {}
+vim.notify = function(msg, level)
+  notified[#notified + 1] = { msg = tostring(msg), level = level }
+end
+require("tutorial.ui.stats").open("telemetry")
+assert_true(#vim.tbl_filter(function(n)
+  return n.msg:find("Analytics are off", 1, true) ~= nil
+end, notified) == 0, "stats view opens when analytics enabled")
+vim.notify = real_notify
+config._reset()
+tutorial.setup()
+
+-- --- Poll timer ---------------------------------------------------------------
+
+registry._clear()
+state._set_dir(vim.fn.tempname() .. "/progress15")
+config._reset()
+config.setup({ poll_ms = 25 })
+local poll_flag = false
+registry.register({
+  id = "polled",
+  title = "Polled",
+  layout = "card",
+  steps = {
+    {
+      id = "wait",
+      title = "Wait",
+      body = { "b" },
+      completion = {
+        {
+          context = function()
+            return poll_flag
+          end,
+        },
+      },
+    },
+    { id = "manual", title = "Manual", body = { "b" } },
+  },
+})
+session = engine.start_id("polled")
+poll_flag = true
+assert_true(
+  vim.wait(1000, function()
+    return state.is_done("polled", "wait")
+  end),
+  "timer polling completes without manual evaluation"
+)
+assert_true(engine._poll_timer() ~= nil, "poll timer exists while polling is configured")
+engine.quit(true)
+assert_true(engine._poll_timer() == nil, "quit stops the poll timer")
+config._reset()
+tutorial.setup()
+
+-- --- Status variants ----------------------------------------------------------
+
+registry.register({
+  id = "percenty",
+  title = "Percenty",
+  layout = "card",
+  steps = {
+    { id = "one", title = "One", body = "b" },
+    { id = "two", title = "Two", body = "b" },
+  },
+})
+state.reset("polled")
+session = engine.start_id("polled")
+assert_true(tutorial.status() == "Polled 0/2", "legacy status format intact")
+engine.quit(true)
+session = engine.start_id("percenty")
+assert_true(tutorial.status("percent") == "Percenty 0%", "percent variant at start")
+engine.done()
+assert_true(tutorial.status("percent") == "Percenty 50%", "percent variant mid-tour")
+engine.quit(true)
+state.mark_done("pedagogy", "p1")
+registry.register({
+  id = "stepped",
+  title = "Stepped",
+  layout = "card",
+  steps = {
+    { id = "one", title = "The First", body = "b" },
+    { id = "two", title = "The Second", body = "b" },
+  },
+})
+session = engine.start_id("stepped")
+assert_true(
+  tutorial.status("step") == "Stepped · The First",
+  ("step variant names the current step (got %q)"):format(tostring(tutorial.status("step")))
+)
+engine.goto_step(1)
+assert_true(tutorial.status("step") == "Stepped · The Second", "step variant tracks navigation")
+engine.quit(true)
+
+-- --- Loader: JSON portable format ---------------------------------------------
+
+local L = tutorial._loader
+local jdir = vim.fn.tempname()
+vim.fn.mkdir(jdir, "p")
+
+local json_def = L.from_json([[
+{
+  "id": "from-json",
+  "title": "From JSON",
+  "tags": ["portable"],
+  "steps": [
+    { "id": "j1", "title": "Read this", "body": ["hello from data"] },
+    {
+      "id": "j2",
+      "title": "Name it {ctx:thing}",
+      "body": ["You said {answer:j2}."],
+      "hint": ["think hard"],
+      "input": {
+        "question": "Thing name",
+        "store": "thing",
+        "pattern": "^%a+$",
+        "message": "letters only"
+      },
+      "completion": ["on_command:JsonGo"]
+    }
+  ]
+}
+]])
+assert_true(json_def.id == "from-json", "JSON decodes to a definition")
+registry.register(json_def)
+assert_true(registry.get("from-json") ~= nil, "JSON definition registers")
+
+_, err = pcall(L.from_json, "{ not json ")
+assert_true(err:find("invalid JSON", 1, true) ~= nil, "broken JSON reports decode failure")
+_, err =
+  pcall(L.from_json, [[{ "id": "x", "title": "X", "steps": [ { "id": "a", "title": "" } ] }]])
+assert_true(err:find("requires", 1, true) ~= nil, "JSON definitions pass structural validation")
+
+vim.fn.writefile({
+  "{\"id\":\"filed\",\"title\":\"Filed\",\"steps\":[{\"id\":\"f1\",\"title\":\"F\",\"body\":\"b\"}]}",
+}, jdir .. "/filed.tutorial.json")
+L.load_file(jdir .. "/filed.tutorial.json")
+assert_true(registry.get("filed") ~= nil, "load_file registers a .tutorial.json")
+
+vim.fn.writefile({
+  "return { id = 'filedlua', title = 'FiledLua',",
+  "  steps = { { id = 'l1', title = 'L', body = 'b', cond = function() return true end } },",
+  "}",
+}, jdir .. "/filedlua.lua")
+L.load_file(jdir .. "/filedlua.lua")
+assert_true(registry.get("filedlua") ~= nil, "load_file registers a .lua with hooks")
+
+vim.fn.writefile({ "not a tutorial" }, jdir .. "/notes.txt")
+_, err = pcall(L.load_file, jdir .. "/notes.txt")
+assert_true(err:find("unsupported tutorial format", 1, true) ~= nil, "unknown extensions refused")
+_, err = pcall(L.load_file, jdir .. "/ghost.tutorial.json")
+assert_true(err:find("no readable tutorial file", 1, true) ~= nil, "missing files refused")
+
+-- Pattern-validated inputs work without Lua validators: a mismatched answer
+-- re-prompts, a matching one is accepted.
+local pattern_queue = { "abc", "42" }
+input._driver = function()
+  return table.remove(pattern_queue, 1)
+end
+assert_true(
+  input.capture({ question = "Q", pattern = "^%d+$", message = "digits only" }) == "42",
+  "pattern mismatch re-prompts; match accepted"
+)
+input._driver = function()
+  error("unexpected prompt after input tests")
+end
+
+-- --- Scaffold generator -------------------------------------------------------
+
+local sdir = vim.fn.tempname()
+vim.fn.mkdir(sdir, "p")
+local spath = L.scaffold("scaffolded", sdir)
+assert_true(vim.fn.filereadable(spath) == 1, "scaffold writes a file")
+local scaffolded = dofile(spath)
+errors, warnings = V.definition(scaffolded)
+assert_true(#errors == 0, "scaffold has no structural errors")
+assert_true(#warnings == 0, "scaffold lints warning-free")
+registry.register(scaffolded)
+assert_true(registry.get("scaffolded") ~= nil, "scaffold registers cleanly")
+_, err = pcall(L.scaffold, "scaffolded", sdir)
+assert_true(err:find("refusing to overwrite", 1, true) ~= nil, "scaffold refuses to clobber")
+_, err = pcall(L.scaffold, "")
+assert_true(err:find("an id is required", 1, true) ~= nil, "scaffold demands an id")
+
+-- --- Command surface ----------------------------------------------------------
+
+vim.cmd("Tutorial next")
+vim.cmd("Tutorial prev")
+vim.cmd("Tutorial focus")
+vim.cmd("Tutorial status")
+assert_true(true, "idle subcommands do not crash")
+session = engine.start_id("stepped")
+vim.cmd("Tutorial goto 2")
+assert_true(engine.active().index == 2, ":Tutorial goto N jumps")
+vim.cmd("Tutorial next")
+assert_true(engine.active().index == 2, ":Tutorial next clamps at the end")
+vim.cmd("Tutorial prev")
+assert_true(engine.active().index == 1, ":Tutorial prev navigates back")
+engine.quit(true)
+
+-- --- Menu: tags, staleness, filter -------------------------------------------
+
+registry._clear()
+state._set_dir(vim.fn.tempname() .. "/progress16")
+registry.register({
+  id = "tagged",
+  title = "Tagged Tour",
+  tags = { "lsp", "treesitter" },
+  summary = "tagged summary",
+  steps = { { id = "s", title = "S", body = "b" } },
+})
+state.mark_done("tagged", "s")
+registry.register({
+  id = "untagged",
+  title = "Untouched Tour",
+  steps = { { id = "s", title = "S", body = "b" } },
+})
+
+require("tutorial.ui.menu").open()
+local menu_buffer = vim.api.nvim_win_get_buf(0)
+lines = table.concat(vim.api.nvim_buf_get_lines(menu_buffer, 0, -1, false), "\n")
+assert_true(lines:find("%[lsp/treesitter%]", 1, false) ~= nil, "tags render inline")
+assert_true(lines:find("today", 1, true) ~= nil, "finished-today staleness renders")
+assert_true(lines:find("Untouched Tour", 1, true) ~= nil, "unfiltered menu lists everything")
+
+local menu = require("tutorial.ui.menu")
+menu._set_filter("lsp")
+menu.open()
+menu_buffer = vim.api.nvim_win_get_buf(0)
+lines = table.concat(vim.api.nvim_buf_get_lines(menu_buffer, 0, -1, false), "\n")
+assert_true(lines:find("Tagged Tour", 1, true) ~= nil, "filter keeps matching tutorials")
+assert_true(lines:find("Untouched Tour", 1, true) == nil, "filter hides non-matching tutorials")
+menu._set_filter(nil)
+menu.open()
+menu_buffer = vim.api.nvim_win_get_buf(0)
+lines = table.concat(vim.api.nvim_buf_get_lines(menu_buffer, 0, -1, false), "\n")
+assert_true(lines:find("Untouched Tour", 1, true) ~= nil, "clearing the filter restores rows")
+require("tutorial.ui").close_all()
+
 print(("RESULT: %d passed, %d failed"):format(passed, failed))
 os.exit(failed == 0 and 0 or 1)

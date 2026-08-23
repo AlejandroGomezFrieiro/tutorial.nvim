@@ -70,8 +70,10 @@ function M.interpolate(text, ctx, answers)
   )
 end
 
--- One captured value through transform → validate.
+-- One captured value through transform → pattern → validate.
 -- validate returns true, false/nil (generic error), or an error string.
+-- `pattern` is the declarative sibling of a validate function (it is what
+-- data-only definitions can carry): a Lua pattern the answer must match.
 -- Returns (value, nil) when acceptable, (nil, err) otherwise.
 local function normalize(spec, raw)
   local value = raw
@@ -81,6 +83,11 @@ local function normalize(spec, raw)
       return nil, ("transform failed: %s"):format(tostring(transformed))
     end
     value = transformed
+  end
+  if type(value) == "string" and type(spec.pattern) == "string" then
+    if value:find(spec.pattern) == nil then
+      return nil, type(spec.message) == "string" and spec.message or "invalid input"
+    end
   end
   if type(spec.validate) == "function" then
     local ok, res = pcall(spec.validate, value)

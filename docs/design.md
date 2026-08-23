@@ -69,13 +69,59 @@ Interactive walkthroughs eventually need an answer, not just an observation
   BufEnter, and completing a step mid-render would swap buffers under the
   renderer's feet. The hub defers, then guards against re-entrancy.
 - Command observation happens on `CmdlineLeave`; matching is by leading
-  command word, so `on_command:echo` survives arbitrary arguments but never
-  matches `:echom`-style prefixes of longer names.
+  command phrase, so `on_command:echo` survives arbitrary arguments but never
+  matches `:echom`-style prefixes of longer names. A trailing `!`
+  (`on_command:X!`) additionally demands proof of success — `v:errmsg`
+  snapshotted at CmdlineEnter and compared on leave — because a step that
+  checks off on a typo teaches the wrong lesson.
 - State predicates are polled cheaply and often — card render, save, buffer
-  entry, cursor hold — so "already true" conditions complete eagerly on
-  display. That is a feature: write predicates that answer "is the world in
-  the desired state", not "did the user just act".
+  entry, cursor hold, and an opt-in timer (`poll_ms`) — so "already true"
+  conditions complete eagerly on display. That is a feature: write predicates
+  that answer "is the world in the desired state", not "did the user just act".
 - The session renders from a *resolved* step list: `def.steps` may be a
   function of ctx and `cond` drops steps the answers exclude. Skipped steps
   are not rendered, not counted, and never marked done — progress totals stay
   honest to what the user actually sees.
+
+## Observation breadth
+
+The engine watches more editor surfaces as steps demand them, but always
+through the one hub: typed keys flow through a single engine-owned
+`vim.on_key` listener (tutorials attach nothing), buffer text and diagnostics
+are plain state predicates, and User-event matching accepts globs. Each
+addition follows the same rule as the originals — declarative strings first,
+functions only where nothing else can tell the truth.
+
+## Teaching, not just tracking
+
+Completion events say "well done"; three small features let tours also *teach*
+in the moment:
+
+- **Hint ladders** (`hint` as a list) fade support in on demand instead of
+  front-loading every nudge — scaffolding that withdraws rather than smothers.
+  The same key reveals **recall steps**, whose `{key:…}` tokens stay masked
+  until the learner attempts the motion: retrieval before revelation.
+- **Mistakes** are author-declared wrong actions with gentle corrective copy.
+  They fire on exactly the actions the author anticipated, they never advance
+  or trap (the note appears; the user remains in control), and they exist to
+  turn a dead end into the lesson. A completion spec still outranks nothing:
+  if the action would also have completed the step, the mistake wins — being
+  corrected is worth more than an unearned checkmark.
+- **Analytics** (`analytics = true`) record time-per-step, hint presses, and
+  mistake hits locally, because authors cannot anticipate every error until
+  they see where learners stall.
+
+None of this changes the contract: `d` completes anything, focus never moves,
+and a tutorial that cannot verify still cannot trap.
+
+## Data that stays data
+
+Definitions arriving from outside the codebase — shared `.tutorial.json`
+files today — pass a purity check: no function values anywhere. That boundary
+is what makes file-borne content safe by construction, and it is why JSON,
+not Markdown/YAML/TOML, is the portable format: Neovim parses JSON in core
+(zero dependencies), agents and humans emit it reliably, validation errors
+have nowhere to hide, and Lua tables remain the full-power authoring surface
+for everyone who wants predicates and hooks. Linting rides the same principle:
+structural errors refuse registration, soft warnings surface loudly — a typo
+in a shipped tour should be visible at load time, never discovered mid-tour.

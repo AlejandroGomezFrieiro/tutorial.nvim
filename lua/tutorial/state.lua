@@ -3,16 +3,18 @@
 -- step off, only `reset` un-checks it (the VS Code walkthrough model).
 --
 -- Layout: <data_dir>/<tutorial-id>.json →
---   { done = { [step_id] = os.time() },          -- write-once completions
+--   { version = 1,                               -- schema version
+--     done = { [step_id] = os.time() },          -- write-once completions
 --     answers = { [step_id] = value },           -- input-step captures
---     vars = { [key] = value } }                 -- free-form tour variables
+--     vars = { [key] = value },                  -- free-form tour variables
+--     stats = { [step_id] = {...} } }            -- opt-in timing/hint usage
 -- Answers and vars are re-writable (re-answering overwrites); only `reset`
 -- clears them. The data dir defaults to stdpath("data")/tutorial and can be
 -- overridden via setup({ data_dir = ... }) or _set_dir() in tests.
 
 local M = {}
 
-local data_dir
+local VERSION = 1
 
 M._set_dir = function(dir)
   data_dir = dir
@@ -30,22 +32,30 @@ local function path(id)
   return dir() .. "/" .. id .. ".json"
 end
 
+local function blank()
+  return { version = VERSION, done = {}, answers = {}, vars = {}, stats = {} }
+end
+
 local function read(id)
   if vim.fn.filereadable(path(id)) ~= 1 then
-    return { done = {}, answers = {}, vars = {} }
+    return blank()
   end
   local ok, data = pcall(vim.json.decode, table.concat(vim.fn.readfile(path(id)), "\n"))
   if not ok or type(data) ~= "table" then
-    return { done = {}, answers = {}, vars = {} }
+    return blank()
   end
+  -- Older files predate the version field; everything here is additive.
+  data.version = data.version or VERSION
   data.done = data.done or {}
   data.answers = data.answers or {}
   data.vars = data.vars or {}
+  data.stats = data.stats or {}
   return data
 end
 
 local function write(id, data)
   vim.fn.mkdir(dir(), "p")
+  data.version = VERSION
   local lines = { vim.json.encode(data) }
   vim.fn.writefile(lines, path(id))
 end
@@ -112,6 +122,30 @@ end
 
 function M.get_var(id, key)
   return read(id).vars[key]
+end
+
+-- Stats: opt-in per-step telemetry (elapsed seconds, hint presses). Written
+-- when a step completes; only `reset` clears them.
+function M.set_stats(id, step_id, stat)
+  local data = read(id)
+  data.stats[step_id] = stat
+  write(id, data)
+end
+
+function M.stats(id)
+  return read(id).stats or {}
+end
+
+-- Timestamp of the most recent completion, or nil for untouched tours.
+-- The menu uses this to show how stale a finished tour is.
+function M.last_done_at(id)
+  local latest
+  for _, ts in pairs(read(id).done) do
+    if latest == nil or ts > latest then
+      latest = ts
+    end
+  end
+  return latest
 end
 
 -- Reset one tutorial, or every tutorial when id is nil.
